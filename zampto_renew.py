@@ -755,15 +755,18 @@ def do_login(sb) -> bool:
         print("   未找到提交按钮，使用回车提交")
 
     print("⏳ 等待跳转登录成功...")
+    logged_in_paths = ["/homepage", "/dashboard", "/home", "/console", "/servers", "/overview", "/main"]
+    auth_paths = ["/auth/login", "/auth/signin", "/sign-in", "/login", "/register"]
     for _ in range(60):
         try:
             url = sb.get_current_url()
-            # wode808 实测：登录成功后跳转到 /homepage
-            if "/homepage" in url:
+            lower_url = url.lower()
+            # 明确的登录后路径
+            if any(p in lower_url for p in logged_in_paths):
                 print(f"✅ 登录成功: {url}")
                 return True
-            # 兼容不带 /homepage 的情况：在 DOMAIN 内且已离开登录页
-            if ZAMPTO_APP_ID and "/sign-in" not in url and DOMAIN in url:
+            # 兜底：仍在目标域名内，且已离开所有登录/注册页
+            if DOMAIN in lower_url and not any(p in lower_url for p in auth_paths):
                 print(f"✅ 登录成功（已离开登录页）: {url}")
                 return True
         except Exception:
