@@ -32,9 +32,9 @@ else:
 GOST_PROXY = os.environ.get("GOST_PROXY", "")
 LOCAL_PROXY = "http://127.0.0.1:8080" if GOST_PROXY else ""
 
-# LOGIN_URL: Zampto 登录页地址；默认保留带 app_id 的旧地址，可通过环境变量覆盖
-LOGIN_URL = os.environ.get("LOGIN_URL", "https://dash.zampto.net/auth/login")
-DOMAIN = os.environ.get("ZAMPTO_DOMAIN", "dash.zampto.net")
+# LOGIN_URL: Zampto 登录页地址；未设置或为空时使用 dash.zampto.net 的默认地址
+LOGIN_URL = os.environ.get("LOGIN_URL", "") or "https://dash.zampto.net/auth/login"
+DOMAIN = os.environ.get("ZAMPTO_DOMAIN", "") or "dash.zampto.net"
 
 # TARGET_SERVERS: JSON 字符串，例如 '[{"id":"4480","name":"java"},{"id":"4481","name":"python"}]'
 #   也可用 TARGET_IDS / TARGET_NAMES 逗号分隔形式
