@@ -1019,9 +1019,60 @@ def renew_server(sb, server: dict) -> bool:
     print("-" * 40)
 
     # ① 直接打开服务器详情页
+    #    注意：不用 uc_open_with_reconnect（遇 CF 挑战会重连丢 cookie 被踢回登录页），
+    #    用原生 driver.get 保持同一上下文；若仍被重定向登录页则恢复 cookie 重试，最后再重新登录。
     print(f"🌐 访问: {server_url}  [{now_str()}]")
-    sb.uc_open_with_reconnect(server_url, reconnect_time=4)
+    saved_cookies = None
+    try:
+        saved_cookies = sb.driver.get_cookies()
+    except Exception:
+        pass
+    try:
+        sb.driver.get(server_url)
+    except Exception as e:
+        print(f"  ⚠️ 打开详情页异常: {e}")
     time.sleep(4)
+
+    for attempt in range(3):
+        try:
+            cur = sb.get_current_url()
+        except Exception:
+            cur = ""
+        if "login" not in cur.lower():
+            break
+        print(f"  ⚠️ 第 {attempt+1} 次被重定向到登录页: {cur}")
+        if saved_cookies:
+            try:
+                for c in saved_cookies:
+                    try:
+                        sb.driver.add_cookie(c)
+                    except Exception:
+                        pass
+                print("  🔄 已恢复会话 cookie，重新加载详情页...")
+                sb.driver.get(server_url)
+                time.sleep(4)
+                continue
+            except Exception as e:
+                print(f"  ⚠️ 恢复 cookie 失败: {e}")
+        print("  🔄 会话已失效，重新登录...")
+        if not do_login(sb):
+            return False
+        if saved_cookies:
+            try:
+                for c in saved_cookies:
+                    try:
+                        sb.driver.add_cookie(c)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        sb.driver.get(server_url)
+        time.sleep(4)
+    else:
+        print("  ❌ 多次尝试后仍停留在登录页")
+        take_screenshot(sb, f"{prefix}_still_login.png")
+        send_tg(f"🖥 {name}\n❌ 访问详情页被持续踢回登录页\n时间: {now_str()}")
+        return False
     take_screenshot(sb, f"{prefix}_loaded.png")
 
     # ② 读取当前剩余时间
