@@ -655,6 +655,81 @@ def handle_turnstile(sb, current_url: str = "", no_refresh: bool = False,
 
 
 # ============================================================
+#   关闭页面上的各类非必要弹窗/overlay/广告，避免干扰 Turnstile
+# ============================================================
+def close_all_popups(sb):
+    """在关键步骤前清理：cookie consent、普通 dialog、广告 iframe、overlay/backdrop"""
+    try:
+        sb.execute_script("""
+            (function() {
+                var removed = 0;
+                // 1) Google / OneTrust / CookieYes 等常见 CMP 弹窗
+                var cmpSelectors = [
+                    '[class*="cookie-consent"]', '[class*="cookieConsent"]', '[id*="cookie-consent"]',
+                    '[id*="cookieConsent"]', '[class*="cmp-"]', '[id*="cmp-"]',
+                    '[class*="fides-"]', '[class*="onetrust-"]', '[id*="onetrust-"]',
+                    '[class*="truste_"]', '[class*="CybotCookiebotDialog"]', '[id*="CybotCookiebotDialog"]',
+                    '[class*="privacy-settings"]', '[class*="privacySettings"]',
+                    '[aria-label*="cookie" i]', '[aria-label*="privacy" i]'
+                ];
+                cmpSelectors.forEach(function(sel) {
+                    document.querySelectorAll(sel).forEach(function(el) {
+                        el.style.display = 'none'; el.remove(); removed++;
+                    });
+                });
+                // 2) 通用 dialog / modal（带关闭按钮的先点关闭，再移除）
+                var dialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"], .modal, [class*="modal"], [class*="dialog"], [class*="Dialog"]');
+                dialogs.forEach(function(d) {
+                    // 如果这是 Renew Server 弹框本身，保留它
+                    var title = (d.innerText || '').toLowerCase();
+                    if (title.indexOf('renew server') !== -1 || title.indexOf('security verification') !== -1) {
+                        return;
+                    }
+                    var closeBtn = d.querySelector('button[class*="close"], svg[class*="close"], [aria-label*="close" i], [class*="CloseButton"], button svg');
+                    if (closeBtn) {
+                        try { closeBtn.click(); } catch (e) {}
+                    }
+                    d.style.display = 'none'; d.remove(); removed++;
+                });
+                // 3) 非 Turnstile iframe 广告（如 Discover more 等）
+                document.querySelectorAll('iframe').forEach(function(f) {
+                    var src = (f.src || '').toLowerCase();
+                    if (src.indexOf('cloudflare') === -1 && src.indexOf('turnstile') === -1) {
+                        f.style.display = 'none'; f.remove(); removed++;
+                    }
+                });
+                // 4) 固定定位的高 z-index overlay/backdrop
+                document.querySelectorAll('div').forEach(function(el) {
+                    var style = window.getComputedStyle(el);
+                    if (style.position === 'fixed' && parseInt(style.zIndex || 0) > 1000) {
+                        var w = el.offsetWidth, h = el.offsetHeight;
+                        // 如果它覆盖了大半个屏幕但不是 Renew Server 弹框，移除
+                        if (w > window.innerWidth * 0.5 && h > window.innerHeight * 0.5) {
+                            var t = (el.innerText || '').toLowerCase();
+                            if (t.indexOf('renew server') === -1 && t.indexOf('security verification') === -1) {
+                                el.style.display = 'none'; el.remove(); removed++;
+                            }
+                        }
+                    }
+                });
+                // 5) 页面底部/侧边常见的固定广告条
+                var adSelectors = [
+                    '[class*="advertisement"]', '[class*="ad-"]', '[id*="ad-"]',
+                    '[class*="banner"]', '[class*="toast"]', '[class*="snackbar"]'
+                ];
+                adSelectors.forEach(function(sel) {
+                    document.querySelectorAll(sel).forEach(function(el) {
+                        el.style.display = 'none'; el.remove(); removed++;
+                    });
+                });
+                return removed;
+            })();
+        """)
+    except Exception as e:
+        print(f"  [close_all_popups] ⚠️ 清理异常: {e}")
+
+
+# ============================================================
 #   页面解析
 # ============================================================
 def get_time_left(sb) -> str:
@@ -806,27 +881,12 @@ def renew_server(sb, server: dict) -> bool:
     time_left = get_time_left(sb)
     print(f"⏱️  当前剩余时间: {time_left or '未读取到'}")
 
-    # ③ 点击续期按钮（先确保没有残留弹框，避免重复点击叠加）
-    print("🔍 查找续期按钮...")
-    # 防御：开始前若已有弹框，先尝试关闭，避免重复点击产生多个弹框
-    try:
-        existing = sb.execute_script("""
-            (function(){
-                var boxes = document.querySelectorAll('div[role="dialog"], div[role="alertdialog"], .modal, [class*="modal"], [class*="dialog"], [class*="Dialog"]');
-                if (boxes.length === 0) return 0;
-                for (var i = 0; i < boxes.length; i++) {
-                    var close = boxes[i].querySelector('button, svg, [class*="close"], [aria-label*="close" i]');
-                    if (close) close.click();
-                }
-                return boxes.length;
-            })();
-        """)
-        if existing:
-            print(f"  ℹ️ 检测到 {existing} 个残留弹框，已在点击前关闭")
-            _rand_sleep(0.5, 1.0)
-    except Exception as e:
-        print(f"  ⚠️ 检查/关闭残留弹框异常（可忽略）: {e}")
+    # ②B 清理页面上的非必要弹窗/广告，避免遮挡或干扰 Turnstile
+    print("🧹 清理页面弹窗、cookie consent、广告条...")
+    close_all_popups(sb)
 
+    # ③ 点击续期按钮
+    print("🔍 查找续期按钮...")
     if not click_renew_button(sb):
         # 打印页面所有按钮帮助调试
         btns = sb.execute_script("""
@@ -880,20 +940,8 @@ def renew_server(sb, server: dict) -> bool:
         print(f"    ⏳ 重触发前等待 20s，让弹框充分加载... [{now_str()}]")
         time.sleep(20)
         try:
-            sb.execute_script("""
-                (function(){
-                    var boxes = document.querySelectorAll('div[role="dialog"], div[role="alertdialog"], .modal, [class*="modal"], [class*="dialog"], [class*="Dialog"]');
-                    for (var i = 0; i < boxes.length; i++) {
-                        var close = boxes[i].querySelector('button, svg, [class*="close"], [aria-label*="close" i]');
-                        if (close) {
-                            if (typeof close.click === 'function') close.click();
-                            else if (close.dispatchEvent) {
-                                close.dispatchEvent(new MouseEvent('click', {bubbles: true}));
-                            }
-                        }
-                    }
-                })();
-            """)
+            print("    🧹 重触发前清理页面弹窗/广告...")
+            close_all_popups(sb)
             _rand_sleep(0.5, 1.0)
         except Exception as e:
             print(f"    关闭旧弹框失败（可忽略）: {e}")
@@ -903,6 +951,9 @@ def renew_server(sb, server: dict) -> bool:
         else:
             print("    ⚠️ 重新点击 Renew Server 失败（可能弹框已不在页面上）")
         return ok
+
+    # 处理 Turnstile 前再清理一次页面弹窗/广告
+    close_all_popups(sb)
 
     if not handle_turnstile(sb, current_url="", no_refresh=True,
                              on_retry=retry_renew_modal, max_retry=2,
