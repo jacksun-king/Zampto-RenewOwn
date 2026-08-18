@@ -933,6 +933,45 @@ def close_result_modal(sb):
         print(f"  ⚠️ 关闭弹框异常（可忽略）: {e}")
 
 
+def _modal_has_turnstile(sb) -> bool:
+    """检测续期弹框是否出现 Turnstile（含 Loading security verification 阶段）"""
+    try:
+        info = sb.execute_script("""
+            (function() {
+                var input = document.querySelector('input[name="cf-turnstile-response"]');
+                var frames = document.querySelectorAll('iframe');
+                var cfFrame = false;
+                for (var i = 0; i < frames.length; i++) {
+                    if ((frames[i].src || '').indexOf('challenges.cloudflare.com') !== -1) cfFrame = true;
+                }
+                var bodyText = (document.body.innerText || '').toLowerCase();
+                var loading = bodyText.indexOf('loading security verification') !== -1 ||
+                              bodyText.indexOf('complete the security verification') !== -1 ||
+                              bodyText.indexOf('security verification') !== -1;
+                return {hasInput: !!input, cfFrame: cfFrame, loading: loading,
+                        tokenOk: !!(input && input.value && input.value.length > 20)};
+            })();
+        """)
+        if info.get("tokenOk"):
+            return False  # token 已生成，无需处理
+        return bool(info.get("hasInput") or info.get("cfFrame") or info.get("loading"))
+    except Exception:
+        return False
+
+
+def _handle_modal_turnstile(sb):
+    """轻量处理续期弹框内的 Turnstile：检测到就点击一次并等待 token 生成。
+    不做复杂重试/重触发弹框；token 未生成也不阻塞主流程。"""
+    print("  🖱️ 检测到弹框 Turnstile（Loading security verification），轻量点击处理...")
+    _click_turnstile(sb)
+    for i in range(60):  # 最多等 60s token
+        if _ts_solved(sb):
+            print(f"  ✅ 弹框 Turnstile token 已生成（{i+1}s）")
+            return
+        time.sleep(1)
+    print("  ⚠️ 弹框 Turnstile token 未在 60s 内生成，继续等待结果弹框")
+
+
 # ============================================================
 #   单个服务器续期
 # ============================================================
@@ -979,13 +1018,18 @@ def renew_server(sb, server: dict) -> bool:
     time.sleep(3)
     take_screenshot(sb, f"{prefix}_after_click.png")
 
-    # ④ 等待弹出续期结果（不再处理 Turnstile）
-    #    点击续期后弹框可能会短暂加载，一直等到弹框内出现
-    #    "续期完成/成功" 或 "冷却中" 文案为止；最多等 120s。
-    print(f"⏳ 等待续期结果弹框（最多 120s，不处理 Turnstile）... [{now_str()}]")
+    # ④ 等待弹出续期结果（弹框内若出现 Turnstile / Loading security verification，
+    #    做一次轻量点击处理等 token；不做复杂重试/重触发）。
+    #    直到弹框内出现"续期完成/成功"或"冷却中"文案为止；最多等 180s。
+    print(f"⏳ 等待续期结果弹框（最多 180s，弹框 Turnstile 轻量处理）... [{now_str()}]")
     start = time.time()
     final_status = "unknown"
-    while time.time() - start < 120:
+    ts_handled = False
+    while time.time() - start < 180:
+        # 弹框 Turnstile 只轻量处理一次（点击 + 等 token）
+        if not ts_handled and _modal_has_turnstile(sb):
+            _handle_modal_turnstile(sb)
+            ts_handled = True
         r = _check_renew_result(sb)
         if r == "success":
             print(f"🎉 弹框已出现续期完成文案（耗时 {time.time()-start:.1f}s）")
@@ -1001,7 +1045,7 @@ def renew_server(sb, server: dict) -> bool:
         time.sleep(1)
 
     if final_status == "unknown":
-        print("⚠️ 120s 内未检测到明确结果弹框，按未知处理，仍会读取剩余时长")
+        print("⚠️ 180s 内未检测到明确结果弹框，按未知处理，仍会读取剩余时长")
     time.sleep(1)
     take_screenshot(sb, f"{prefix}_modal_result.png")
 
