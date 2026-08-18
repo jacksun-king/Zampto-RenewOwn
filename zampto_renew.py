@@ -134,7 +134,7 @@ def _ts_exists(sb, label: str = ""):
     label 用于在日志中标记当前检测阶段。"""
     try:
         info = sb.execute_script("""
-            return (function(){
+            (function(){
                 var input = document.querySelector('input[name="cf-turnstile-response"]');
                 var inputFound = !!input;
                 var inputVisible = !!(input && input.offsetParent !== null);
@@ -168,7 +168,7 @@ def _ts_solved(sb):
     """检测 Turnstile token 是否已生成"""
     try:
         return bool(sb.execute_script("""
-            return (function(){
+            (function(){
                 var i=document.querySelector('input[name="cf-turnstile-response"]');
                 return !!(i && i.value && i.value.length > 20);
             })();
@@ -485,7 +485,7 @@ def _click_turnstile(sb):
             _dump_turnstile_state(sb, "无坐标")
             return
         wi = sb.execute_script(
-            "return (function(){ return {sx: window.screenX||0, sy: window.screenY||0,"
+            "(function(){ return {sx: window.screenX||0, sy: window.screenY||0,"
             "oh: window.outerHeight, ih: window.innerHeight, py: window.screenTop||window.screenY||0}; })();")
         bar = wi["oh"] - wi["ih"]
         ax = coords["cx"] + (wi.get("sx", 0) or 0)
@@ -680,7 +680,7 @@ def click_renew_button(sb) -> bool:
 def _check_renew_result(sb):
     """检测续期弹窗/弹框结果：success / cooldown / None"""
     try:
-        return sb.execute_script("""
+        result = sb.execute_script("""
             (function() {
                 var allText = document.body.innerText || '';
                 // 弹框优先级更高：优先读取弹框内的文字
@@ -706,6 +706,7 @@ def _check_renew_result(sb):
                 return null;
             })();
         """)
+        return result
     except:
         return None
 
