@@ -127,11 +127,12 @@ _EXPAND_JS = """
 """
 
 
-def _ts_exists(sb, label: str = ""):
+def _ts_exists(sb, label: str = "", detect_loading: bool = False):
     """检测页面或弹框内是否存在 Turnstile 相关元素。
     只认 Cloudflare Turnstile 的 input 或 challenges.cloudflare.com iframe，
     避免把 googlesyndication 广告 iframe 误判为 Turnstile。
-    label 用于在日志中标记当前检测阶段。"""
+    label 用于在日志中标记当前检测阶段。
+    detect_loading: True 时，若弹框仍在 'Loading security verification...' 也视为即将出现。"""
     try:
         info = sb.execute_script("""
             (function(){
@@ -152,12 +153,21 @@ def _ts_exists(sb, label: str = ""):
                 for (var b = 0; b < boxes.length; b++) {
                     checkFrames(boxes[b].querySelectorAll('iframe'));
                 }
-                return {inputFound: inputFound, inputVisible: inputVisible, cfFrames: cfFrames};
+                var loading = false;
+                var bodyText = (document.body.innerText || '').toLowerCase();
+                if (bodyText.indexOf('loading security verification') !== -1 ||
+                    bodyText.indexOf('please complete the security verification') !== -1) {
+                    loading = true;
+                }
+                return {inputFound: inputFound, inputVisible: inputVisible, cfFrames: cfFrames, loading: loading};
             })();
         """)
         exists = bool(info.get("inputFound") or info.get("cfFrames"))
         if exists:
             print(f"  [TS检测/{label or 'default'}] ✅ 发现 Turnstile: inputFound={info.get('inputFound')} inputVisible={info.get('inputVisible')} cfFrames={len(info.get('cfFrames', []))}")
+        elif detect_loading and info.get("loading"):
+            print(f"  [TS检测/{label or 'default'}] ⏳ Turnstile 仍在 Loading 中，继续等待...")
+            return True  # 视为存在，让上层继续等待
         return exists
     except Exception as e:
         print(f"  [TS检测/{label or 'default'}] ⚠️ JS 执行异常: {e}")
@@ -508,7 +518,9 @@ def handle_turnstile(sb, current_url: str = "", no_refresh: bool = False,
     max_retry:   弹框模式下最多重触发弹框的次数（默认 2，避免短时高频点击被风控/封节点）
 
     注意：弹框模式下绝对不会刷新页面，也不会无限重触发弹框。达到 max_retry 上限
-    后直接返回失败，交由上层决定是否放弃该服务器续期，绝不会要求重启工作流。"""
+    后直接返回失败，交由上层决定是否放弃该服务器续期，绝不会要求重启工作流。
+    如果 Turnstile 没有显示复选框（invisible/无需点击），本函数会等待其自动通过，
+    不会强行点击空气导致流程卡死。"""
     print("🔍 处理 Turnstile 验证...")
     print(f"  [配置] no_refresh={no_refresh} max_retry={max_retry} 当前时间={now_str()}")
     t0 = time.time()
@@ -521,6 +533,32 @@ def handle_turnstile(sb, current_url: str = "", no_refresh: bool = False,
         sb.execute_script(_EXPAND_JS)
         _humanize(sb)
         time.sleep(1.0)
+
+    # 关键：判断当前是否真的有可交互的 Turnstile 元素。
+    # 有些情况下 Turnstile 不会显示复选框（token 已通过 invisible 方式生成），
+    # 此时应等待自动通过，而不是反复点击空气。
+    ts_interactive = _ts_exists(sb, label="handle可交互检测")
+    if not ts_interactive:
+        print("  ℹ️ 未检测到可交互 Turnstile 元素，等待自动通过（不点击空气）...")
+        # 最多等 ~150s（2.5 分钟），期间一旦通过立即返回
+        for i in range(150):
+            time.sleep(1.0)
+            if _ts_solved(sb):
+                print(f"  ✅ Turnstile 自动通过（耗时 {time.time()-t0:.1f}s）")
+                return True
+        # 仍然未通过：可能是 invisible 已出但还没写入，再轻点一次兜底
+        print("  ⏳ 仍未通过，尝试一次兜底点击...")
+        _click_turnstile(sb)
+        for i in range(30):
+            time.sleep(1.0)
+            if _ts_solved(sb):
+                print(f"  ✅ Turnstile 通过（兜底点击后，耗时 {time.time()-t0:.1f}s）")
+                return True
+        print(f"  ❌ Turnstile 未出现可交互元素且未自动通过（耗时 {time.time()-t0:.1f}s）")
+        _dump_turnstile_state(sb, "最终")
+        take_screenshot(sb, "turnstile_fail.png")
+        return False
+
     retry_count = 0
     for attempt in range(6):
         if _ts_solved(sb):
@@ -773,12 +811,12 @@ def renew_server(sb, server: dict) -> bool:
     take_screenshot(sb, f"{prefix}_after_click.png")
 
     # ④ 等待弹框内的 Turnstile 加载（不能刷新页面，否则弹框会消失）
-    print(f"⏳ 等待 Turnstile 加载（最多 30s，不刷新页面）... [{now_str()}]")
+    print(f"⏳ 等待 Turnstile 加载（最多 60s，不刷新页面）... [{now_str()}]")
     ts_found = False
     pre_result = None
-    for _ in range(30):
-        if _ts_exists(sb):
-            print(f"✅ 检测到 Turnstile（第 {_+1}s）")
+    for _ in range(60):
+        if _ts_exists(sb, label="弹框等待", detect_loading=True):
+            print(f"✅ Turnstile 已加载/加载中（第 {_+1}s）")
             ts_found = True
             break
         # 提前检查是否已出现结果弹窗
