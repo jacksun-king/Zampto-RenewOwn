@@ -28,9 +28,10 @@ else:
     TG_TOKEN = os.environ.get("TG_TOKEN", "")
     TG_ID = os.environ.get("TG_ID", "")
 
-# GOST_PROXY: 工作流启动 GOST 后本地 8080 代理地址；为空则不使用代理
+# GOST_PROXY: 上游代理链接（支持 hy2://、hysteria2://、socks5://、http:// 等）。
+#   工作流会把它转成统一的本地 SOCKS5 端口 127.0.0.1:1080，脚本直接走本地端口。
 GOST_PROXY = os.environ.get("GOST_PROXY", "")
-LOCAL_PROXY = "http://127.0.0.1:8080" if GOST_PROXY else ""
+LOCAL_PROXY = "socks5://127.0.0.1:1080" if GOST_PROXY else ""
 
 # LOGIN_URL: Zampto 登录页地址；未设置或为空时使用默认地址
 #   根据当前面板，默认登录页为 /auth/login
@@ -784,19 +785,19 @@ def main():
         send_tg(f"❌ Zampto 登录页不可达（{LOGIN_URL}）\n时间: {now_str()}")
         raise SystemExit("❌ 登录页不可达，请检查 LOGIN_URL / 代理 / 网络")
 
-    # 代理可选：仅在设置了 GOST_PROXY 时才走本地 8080
+    # 代理可选：SeleniumBase 的 proxy= 在 uc=True 下不生效，必须改用 --proxy-server 启动参数
     sb_proxy = LOCAL_PROXY if LOCAL_PROXY else None
 
-    with SB(uc=True, test=True, proxy=sb_proxy) as sb:
+    with SB(uc=True, test=True,
+            chromium_arg=f"--proxy-server={sb_proxy}" if sb_proxy else None) as sb:
 
         print("🌐 检测出口 IP...")
         try:
             sb.open("https://api.ipify.org/?format=json")
             print(f"✅ 出口 IP: {sb.get_text('body')}")
-        except:
-            print("⚠️ IP 检测超时")
+        except Exception:
+            print("⚠️ IP 检测超时，代理可能未生效")
         print("-" * 40)
-
         if not do_login(sb):
             send_tg(f"❌ Zampto 登录失败\n时间: {now_str()}")
             return
