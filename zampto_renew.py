@@ -32,8 +32,20 @@ else:
 GOST_PROXY = os.environ.get("GOST_PROXY", "")
 LOCAL_PROXY = "http://127.0.0.1:8080" if GOST_PROXY else ""
 
-# LOGIN_URL: Zampto 登录页地址；未设置或为空时使用 dash.zampto.net 的默认地址
-LOGIN_URL = os.environ.get("LOGIN_URL", "") or "https://dash.zampto.net/auth/login"
+# ZAMPTO_APP_ID: 登录 URL 上的 app_id 参数（wode808 验证需要带此参数才能正常过 Cloudflare）
+#   留空则使用不带 app_id 的登录页。默认取 wode808 实测可用的 app_id。
+ZAMPTO_APP_ID = os.environ.get("ZAMPTO_APP_ID", "") or "bmhk6c8qdqxphlyscztgl"
+
+# LOGIN_URL: Zampto 登录页地址；未设置或为空时按 DOMAIN + APP_ID 自动拼装
+_login_raw = os.environ.get("LOGIN_URL", "")
+if _login_raw:
+    LOGIN_URL = _login_raw
+else:
+    if ZAMPTO_APP_ID:
+        LOGIN_URL = f"https://dash.zampto.net/sign-in?app_id={ZAMPTO_APP_ID}"
+    else:
+        LOGIN_URL = "https://dash.zampto.net/sign-in"
+
 DOMAIN = os.environ.get("ZAMPTO_DOMAIN", "") or "dash.zampto.net"
 
 # TARGET_SERVERS: JSON 字符串，例如 '[{"id":"4480","name":"java"},{"id":"4481","name":"python"}]'
@@ -161,24 +173,53 @@ def _rand_sleep(a=0.3, b=0.8):
     time.sleep(a + (b - a) * (hash(str(time.time())) % 1000 / 1000.0))
 
 
+def _dump_turnstile_state(sb, label=""):
+    """输出当前 Turnstile 状态，方便排查。"""
+    try:
+        info = sb.execute_script("""
+            (function() {
+                var iframes = Array.from(document.querySelectorAll('iframe')).map(function(f, i){
+                    var r = f.getBoundingClientRect();
+                    return {
+                        idx: i, src: (f.src || '').substring(0, 120),
+                        w: r.width, h: r.height, x: Math.round(r.x), y: Math.round(r.y),
+                        display: f.style.display, vis: f.style.visibility, op: f.style.opacity
+                    };
+                }).filter(function(x){ return x.src.includes('cloudflare') || x.src.includes('turnstile') || x.w>0; });
+                var inp = document.querySelector('input[name="cf-turnstile-response"]');
+                return {
+                    iframe_count: document.querySelectorAll('iframe').length,
+                    cf_iframes: iframes,
+                    has_input: !!inp,
+                    input_value_len: inp ? (inp.value || '').length : 0,
+                    input_display: inp ? (inp.style.display || '') : ''
+                };
+            })();
+        """)
+        print(f"  [TS诊断{label}] {json.dumps(info, ensure_ascii=False)}")
+    except Exception as e:
+        print(f"  [TS诊断{label}] 获取失败: {e}")
+
+
 def _click_turnstile(sb):
     """多策略点击 Turnstile：SeleniumBase 原生 > iframe 内真实点击 > JS 事件 > xdotool。"""
-    # 策略1：SeleniumBase 自带的 undetected 点击能力（uc_click/handle_turnstile）
+    _dump_turnstile_state(sb, "点击前")
+
+    # 策略1：SeleniumBase 自带的 undetected 点击能力
     try:
-        # 先展开/可见化，确保元素可交互
         sb.execute_script(_EXPAND_JS)
         _rand_sleep(0.2, 0.5)
-        # SeleniumBase 4.x 内置 handle_turnstile，在 uc=True 下通常有效
         if hasattr(sb, "handle_turnstile"):
             sb.handle_turnstile()
             print("  🖱️ 已调用 SeleniumBase handle_turnstile")
-            _rand_sleep(0.5, 1.0)
+            _rand_sleep(0.8, 1.5)
             if _ts_solved(sb):
                 return
     except Exception as e:
         print(f"  ⚠️ SeleniumBase handle_turnstile 未成功: {e}")
 
-    # 策略2：切进 Turnstile iframe，点击内部真实 checkbox（最可靠）
+    # 策略2：切进 Turnstile iframe，点击内部真实 checkbox
+    iframe_info = None
     try:
         iframe_info = sb.execute_script("""
             (function() {
@@ -194,34 +235,52 @@ def _click_turnstile(sb):
             })();
         """)
         if iframe_info:
+            print(f"  📍 定位到 Turnstile iframe #{iframe_info['index']} ({iframe_info['w']}x{iframe_info['h']}) @({iframe_info['x']},{iframe_info['y']})")
             idx = iframe_info["index"]
-            # 尝试通过索引切 iframe
-            iframes = sb.find_elements("iframe")
+            # 兼容多种 SeleniumBase 版本查找 iframe 的方式
+            iframes = []
+            try:
+                iframes = sb.find_elements("iframe")
+            except Exception:
+                try:
+                    from selenium.webdriver.common.by import By
+                    iframes = sb.driver.find_elements(By.TAG_NAME, "iframe")
+                except Exception:
+                    pass
             if idx < len(iframes):
                 sb.switch_to_frame(iframes[idx])
-                _rand_sleep(0.3, 0.6)
-                # iframe 内通常只有一个 checkbox
-                for cb_sel in ['input[type="checkbox"]', '#challenge-stage', '.rc-checkbox']:
+                _rand_sleep(0.4, 0.8)
+                clicked_inside = False
+                for cb_sel in ['input[type="checkbox"]', '#challenge-stage', '.rc-checkbox', 'body']:
                     try:
                         sb.wait_for_element_visible(cb_sel, timeout=3)
                         sb.uc_click(cb_sel)
                         print(f"  🖱️ 已点击 iframe 内元素: {cb_sel}")
-                        sb.switch_to_default_content()
-                        _rand_sleep(0.8, 1.5)
-                        if _ts_solved(sb):
-                            return
+                        clicked_inside = True
                         break
-                    except Exception:
+                    except Exception as ee:
+                        print(f"    iframe 内 {cb_sel} 不可点: {ee}")
                         continue
                 sb.switch_to_default_content()
+                _rand_sleep(1.0, 2.0)
+                if _ts_solved(sb):
+                    return
+                if clicked_inside:
+                    # 点了但没过，可能是风控，不再继续别的策略，让上层刷新重试
+                    return
+            else:
+                print(f"  ⚠️ iframe 索引 {idx} 越界(共{len(iframes)}个)")
+        else:
+            print("  ⚠️ JS 未找到 Turnstile iframe")
     except Exception as e:
         print(f"  ⚠️ iframe 内点击失败: {e}")
+    finally:
         try:
             sb.switch_to_default_content()
         except Exception:
             pass
 
-    # 策略3：JS 点击 iframe 或父容器（作为补充）
+    # 策略3：JS 点击 iframe 或父容器
     try:
         js_ok = sb.execute_script("""
             (function() {
@@ -234,7 +293,7 @@ def _click_turnstile(sb):
                             ['mousedown','mouseup','click'].forEach(function(t){
                                 iframes[i].dispatchEvent(new MouseEvent(t, {
                                     bubbles: true, cancelable: true,
-                                    clientX: r.x + r.width/2, clientY: r.y + r.height/2,
+                                    clientX: r.x + 30, clientY: r.y + r.height/2,
                                     view: window
                                 }));
                             });
@@ -245,10 +304,10 @@ def _click_turnstile(sb):
                 var inp = document.querySelector('input[name="cf-turnstile-response"]');
                 if (inp) {
                     var p = inp.parentElement;
-                    for (var j = 0; j < 12; j++) {
+                    for (var j = 0; j < 15; j++) {
                         if (!p) break;
                         var r = p.getBoundingClientRect();
-                        if (r.width > 100 && r.height > 30) {
+                        if (r.width > 80 && r.height > 25) {
                             ['mousedown','mouseup','click'].forEach(function(t){
                                 p.dispatchEvent(new MouseEvent(t, {
                                     bubbles: true, cancelable: true,
@@ -266,13 +325,13 @@ def _click_turnstile(sb):
         """)
         if js_ok:
             print("  🖱️ 已用 JS 点击 Turnstile")
-            _rand_sleep(0.8, 1.5)
+            _rand_sleep(1.0, 2.0)
             if _ts_solved(sb):
                 return
     except Exception as e:
         print(f"  ⚠️ JS 点击 Turnstile 失败: {e}")
 
-    # 策略4：回退到 xdotool 屏幕坐标（需要 X 环境）
+    # 策略4：回退到 xdotool 屏幕坐标
     print("  🖱️ 回退到 xdotool 点击...")
     try:
         coords = sb.execute_script("""
@@ -283,16 +342,16 @@ def _click_turnstile(sb):
                     if (src.includes('challenges.cloudflare.com') || src.includes('turnstile')) {
                         var r = iframes[i].getBoundingClientRect();
                         if (r.width > 0 && r.height > 0)
-                            return {cx: Math.round(r.x + r.width/2), cy: Math.round(r.y + r.height/2)};
+                            return {cx: Math.round(r.x + 30), cy: Math.round(r.y + r.height/2)};
                     }
                 }
                 var inp = document.querySelector('input[name="cf-turnstile-response"]');
                 if (inp) {
                     var p = inp.parentElement;
-                    for (var j = 0; j < 12; j++) {
+                    for (var j = 0; j < 15; j++) {
                         if (!p) break;
                         var r = p.getBoundingClientRect();
-                        if (r.width > 100 && r.height > 30)
+                        if (r.width > 80 && r.height > 25)
                             return {cx: Math.round(r.x + 30), cy: Math.round(r.y + r.height/2)};
                         p = p.parentElement;
                     }
@@ -302,21 +361,24 @@ def _click_turnstile(sb):
         """)
         if not coords:
             print("  ⚠️ 无法定位 Turnstile 坐标")
+            _dump_turnstile_state(sb, "无坐标")
             return
+        # 窗口坐标修正：考虑浏览器窗口在屏幕上的位置
         wi = sb.execute_script(
             "return (function(){ return {sx: window.screenX||0, sy: window.screenY||0,"
-            "oh: window.outerHeight, ih: window.innerHeight}; })();")
+            "oh: window.outerHeight, ih: window.innerHeight, py: window.screenTop||window.screenY||0}; })();")
         bar = wi["oh"] - wi["ih"]
-        ax = coords["cx"] + wi["sx"]
-        ay = coords["cy"] + wi["sy"] + bar
-        print(f"  🖱️ xdotool 点击 Turnstile ({ax}, {ay}) bar={bar}")
+        ax = coords["cx"] + (wi.get("sx", 0) or 0)
+        ay = coords["cy"] + (wi.get("sy", 0) or 0) + bar
+        print(f"  🖱️ xdotool 点击 Turnstile ({ax}, {ay}) bar={bar} wi={wi}")
         _activate_win()
         _xclick(ax, ay)
+        _rand_sleep(1.0, 2.0)
     except Exception as e:
         print(f"  ⚠️ xdotool 点击也失败: {e}")
 
 
-def handle_turnstile(sb) -> bool:
+def handle_turnstile(sb, current_url: str = "") -> bool:
     print("🔍 处理 Turnstile 验证...")
     time.sleep(2)
     if _ts_solved(sb):
@@ -329,16 +391,29 @@ def handle_turnstile(sb) -> bool:
         if _ts_solved(sb):
             print(f"  ✅ Turnstile 通过（第{attempt+1}次）")
             return True
+        print(f"\n  🔄 Turnstile 第 {attempt+1}/6 次尝试...")
         sb.execute_script(_EXPAND_JS)
         time.sleep(0.3)
         _click_turnstile(sb)
-        for _ in range(8):
-            time.sleep(0.5)
+        for _ in range(10):
+            time.sleep(0.6)
             if _ts_solved(sb):
                 print(f"  ✅ Turnstile 通过（第{attempt+1}次）")
                 return True
-        print(f"  ⚠️ 第{attempt+1}次未通过，重试...")
+        print(f"  ⚠️ 第{attempt+1}次未通过")
+        # 若还有 URL 且未解决，第3、5次刷新页面重新来
+        if current_url and attempt in [2, 4]:
+            print("  🔄 刷新页面重置 Turnstile...")
+            try:
+                sb.uc_open_with_reconnect(current_url, reconnect_time=3)
+                time.sleep(3)
+                for _ in range(3):
+                    sb.execute_script(_EXPAND_JS)
+                    time.sleep(0.5)
+            except Exception as e:
+                print(f"  ⚠️ 刷新失败: {e}")
     print("  ❌ Turnstile 6次均失败")
+    _dump_turnstile_state(sb, "最终")
     take_screenshot(sb, "turnstile_fail.png")
     return False
 
@@ -527,7 +602,7 @@ def renew_server(sb, server: dict) -> bool:
         return False
 
     # ⑤ 处理 Turnstile
-    if not handle_turnstile(sb):
+    if not handle_turnstile(sb, server_url):
         take_screenshot(sb, f"{prefix}_ts_fail.png")
         send_tg(f"🖥 {name}\n❌ Turnstile 验证失败\n时间: {now_str()}")
         return False
@@ -561,7 +636,7 @@ def renew_server(sb, server: dict) -> bool:
 
 
 # ============================================================
-#   登录
+#   登录（对齐 wode808 的两步 identifier 流程）
 # ============================================================
 def do_login(sb) -> bool:
     print(f"🚀 访问登录页: {LOGIN_URL}")
@@ -575,79 +650,59 @@ def do_login(sb) -> bool:
             break
     if _ts_exists(sb):
         print("🔍 登录页检测到 Turnstile，处理中...")
-        if not handle_turnstile(sb):
+        if not handle_turnstile(sb, LOGIN_URL):
             take_screenshot(sb, "login_ts_fail.png")
             return False
 
-    def _fill_and_submit(email_selector, pass_selector):
-        """尝试在给定选择器上填账号密码并提交，成功返回 True"""
-        try:
-            sb.wait_for_element_visible(email_selector, timeout=15)
-        except Exception:
-            return False
-        sb.type(email_selector, ZAMPTO_ACCOUNT)
-        # 单页表单：密码框可能已在当前页
-        try:
-            sb.wait_for_element_visible(pass_selector, timeout=15)
-            sb.type(pass_selector, ZAMPTO_PASSWORD)
-        except Exception:
-            # 两步登录：先提交账号，再等密码页
-            try:
-                sb.click('button[type="submit"]')
-            except Exception:
-                pass
-            try:
-                sb.wait_for_element_visible(pass_selector, timeout=15)
-                sb.type(pass_selector, ZAMPTO_PASSWORD)
-            except Exception:
-                return False
-        # 提交
-        for sel in ['button[type="submit"]', 'button[name="submit"]', 'button']:
-            try:
-                sb.click(sel)
-                break
-            except Exception:
-                continue
-        return True
-
-    print("⌨️  输入账号密码...")
-    ok = False
-    for email_sel, pass_sel in [
-        ('input[name="email"]', 'input[name="password"]'),
-        ('input[name="identifier"]', 'input[name="password"]'),
-        ('input[type="email"]', 'input[type="password"]'),
-    ]:
-        if _fill_and_submit(email_sel, pass_sel):
-            ok = True
-            break
-        else:
-            print(f"  ⚠️ 未找到登录框: {email_sel}")
-
-    if not ok:
-        print("❌ 未能定位登录表单")
+    # 第一步：输入 identifier（邮箱），提交
+    print("⌨️  输入账号...")
+    try:
+        sb.wait_for_element_visible('input[name="identifier"]', timeout=15)
+        sb.type('input[name="identifier"]', ZAMPTO_ACCOUNT)
+        sb.click('button[type="submit"]')
+    except Exception as e:
+        print(f"❌ 账号输入失败: {e}")
         take_screenshot(sb, "login_fail.png")
         return False
 
-    # 提交后可能还有 Turnstile
+    # 等待密码页
+    print("⏳ 等待密码页...")
+    try:
+        sb.wait_for_element_visible('input[name="password"]', timeout=15)
+    except Exception:
+        print("❌ 密码页未出现")
+        take_screenshot(sb, "password_page_fail.png")
+        return False
+
+    # 密码页可能有 Turnstile
     for _ in range(10):
         time.sleep(0.5)
         if _ts_exists(sb):
             break
     if _ts_exists(sb):
-        print("🔍 提交后检测到 Turnstile，处理中...")
-        if not handle_turnstile(sb):
+        print("🔍 密码页检测到 Turnstile，处理中...")
+        if not handle_turnstile(sb, LOGIN_URL):
             take_screenshot(sb, "password_ts_fail.png")
             return False
+
+    # 第二步：输入密码，提交
+    print("⌨️  输入密码...")
+    sb.type('input[name="password"]', ZAMPTO_PASSWORD)
+    sb.click('button[name="submit"]')
 
     print("⏳ 等待跳转登录成功...")
     for _ in range(60):
         try:
             url = sb.get_current_url()
-            # dash.zampto.net 登录成功后跳到面板首页（非 /auth/login）
-            if "/auth/login" not in url and DOMAIN in url:
+            # wode808 实测：登录成功后跳转到 /homepage
+            if "/homepage" in url:
                 print(f"✅ 登录成功: {url}")
                 return True
-        except:
+            # 兼容不带 /homepage 的情况：在 DOMAIN 内且已离开登录页
+            if ZAMPTO_APP_ID and "/sign-in" not in url and DOMAIN in url:
+                print(f"✅ 登录成功（已离开登录页）: {url}")
+                return True
+        except Exception:
             pass
         time.sleep(0.5)
 
