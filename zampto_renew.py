@@ -694,11 +694,19 @@ def do_login(sb) -> bool:
             take_screenshot(sb, "login_ts_fail.png")
             return False
 
-    # 第一步：输入 identifier（邮箱），提交
+    # 第一步：输入账号（邮箱），提交。兼容 identifier / email / type=email 多种表单
     print("⌨️  输入账号...")
     try:
-        sb.wait_for_element_visible('input[name="identifier"]', timeout=15)
-        sb.type('input[name="identifier"]', ZAMPTO_ACCOUNT)
+        account_selector = None
+        for sel in ['input[name="identifier"]', 'input[name="email"]', 'input[type="email"]', 'input#email', 'input[inputmode="email"]']:
+            if sb.element_exists(sel):
+                account_selector = sel
+                print(f"   使用账号输入框: {sel}")
+                break
+        if not account_selector:
+            raise Exception("未找到邮箱/账号输入框 (identifier/email)")
+        sb.wait_for_element_visible(account_selector, timeout=15)
+        sb.type(account_selector, ZAMPTO_ACCOUNT)
         sb.click('button[type="submit"]')
     except Exception as e:
         print(f"❌ 账号输入失败: {e}")
@@ -707,10 +715,14 @@ def do_login(sb) -> bool:
 
     # 等待密码页
     print("⏳ 等待密码页...")
-    try:
-        sb.wait_for_element_visible('input[name="password"]', timeout=15)
-    except Exception:
-        print("❌ 密码页未出现")
+    pw_selector = None
+    for sel in ['input[name="password"]', 'input[type="password"]', 'input#password']:
+        if sb.element_exists(sel):
+            pw_selector = sel
+            print(f"   使用密码输入框: {sel}")
+            break
+    if not pw_selector:
+        print("❌ 密码页未出现或未找到密码输入框")
         take_screenshot(sb, "password_page_fail.png")
         return False
 
@@ -727,8 +739,20 @@ def do_login(sb) -> bool:
 
     # 第二步：输入密码，提交
     print("⌨️  输入密码...")
-    sb.type('input[name="password"]', ZAMPTO_PASSWORD)
-    sb.click('button[name="submit"]')
+    sb.wait_for_element_visible(pw_selector, timeout=15)
+    sb.type(pw_selector, ZAMPTO_PASSWORD)
+    # 提交按钮多选择器兼容
+    submit_ok = False
+    for submit_sel in ['button[name="submit"]', 'button[type="submit"]', 'input[type="submit"]', 'button:contains("Sign in")', 'button:contains("Log in")', 'button:contains("登录")']:
+        if sb.element_exists(submit_sel):
+            sb.click(submit_sel)
+            submit_ok = True
+            print(f"   点击提交按钮: {submit_sel}")
+            break
+    if not submit_ok:
+        # 兜底：直接回车
+        sb.type(pw_selector, "\n")
+        print("   未找到提交按钮，使用回车提交")
 
     print("⏳ 等待跳转登录成功...")
     for _ in range(60):
