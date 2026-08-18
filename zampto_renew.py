@@ -699,7 +699,7 @@ def do_login(sb) -> bool:
     try:
         account_selector = None
         for sel in ['input[name="identifier"]', 'input[name="email"]', 'input[type="email"]', 'input#email', 'input[inputmode="email"]']:
-            if sb.element_exists(sel):
+            if sb.is_element_present(sel):
                 account_selector = sel
                 print(f"   使用账号输入框: {sel}")
                 break
@@ -717,7 +717,7 @@ def do_login(sb) -> bool:
     print("⏳ 等待密码页...")
     pw_selector = None
     for sel in ['input[name="password"]', 'input[type="password"]', 'input#password']:
-        if sb.element_exists(sel):
+        if sb.is_element_present(sel):
             pw_selector = sel
             print(f"   使用密码输入框: {sel}")
             break
@@ -744,7 +744,7 @@ def do_login(sb) -> bool:
     # 提交按钮多选择器兼容
     submit_ok = False
     for submit_sel in ['button[name="submit"]', 'button[type="submit"]', 'input[type="submit"]', 'button:contains("Sign in")', 'button:contains("Log in")', 'button:contains("登录")']:
-        if sb.element_exists(submit_sel):
+        if sb.is_element_present(submit_sel):
             sb.click(submit_sel)
             submit_ok = True
             print(f"   点击提交按钮: {submit_sel}")
