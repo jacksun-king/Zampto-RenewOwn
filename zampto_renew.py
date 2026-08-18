@@ -7,6 +7,7 @@ import json
 import requests
 import subprocess
 from datetime import datetime
+from typing import Callable, Optional
 from seleniumbase import SB
 
 # ============================================================
@@ -127,18 +128,42 @@ _EXPAND_JS = """
 
 
 def _ts_exists(sb):
+    """检测页面或弹框内是否存在 Turnstile 相关元素。
+    只认 Cloudflare Turnstile 的 input 或 challenges.cloudflare.com iframe，
+    避免把 googlesyndication 广告 iframe 误判为 Turnstile。"""
     try:
-        return bool(sb.execute_script(
-            "return (function(){ return document.querySelector('input[name=\"cf-turnstile-response\"]') !== null; })();"))
+        return bool(sb.execute_script("""
+            return (function(){
+                if (document.querySelector('input[name="cf-turnstile-response"]')) return true;
+                function checkFrames(list) {
+                    for (var i = 0; i < list.length; i++) {
+                        var src = list[i].src || '';
+                        if (src.indexOf('challenges.cloudflare.com') !== -1) return true;
+                    }
+                    return false;
+                }
+                if (checkFrames(document.querySelectorAll('iframe'))) return true;
+                // 弹框内兜底
+                var boxes = document.querySelectorAll('div[role="dialog"], div[role="alertdialog"], .modal, [class*="modal"], [class*="dialog"], [class*="Dialog"]');
+                for (var b = 0; b < boxes.length; b++) {
+                    if (checkFrames(boxes[b].querySelectorAll('iframe'))) return true;
+                }
+                return false;
+            })();
+        """))
     except:
         return False
 
 
 def _ts_solved(sb):
+    """检测 Turnstile token 是否已生成"""
     try:
-        return bool(sb.execute_script(
-            "return (function(){ var i=document.querySelector('input[name=\"cf-turnstile-response\"]');"
-            "return !!(i && i.value && i.value.length > 20); })();"))
+        return bool(sb.execute_script("""
+            return (function(){
+                var i=document.querySelector('input[name="cf-turnstile-response"]');
+                return !!(i && i.value && i.value.length > 20);
+            })();
+        """))
     except:
         return False
 
@@ -225,8 +250,59 @@ def _dump_turnstile_state(sb, label=""):
 
 def _click_turnstile(sb):
     """多策略处理 Turnstile：SeleniumBase 原生 > iframe 内真实点击 > JS 事件 > xdotool。
-    对隐藏式 invisible Turnstile 不强行点击，而是用人类化行为等待 token 自动生成。"""
+    对隐藏式 invisible Turnstile 不强行点击，而是用人类化行为等待 token 自动生成。
+    支持弹框/模态框内嵌的 Turnstile。"""
     _dump_turnstile_state(sb, "点击前")
+
+    # 优先策略：直接定位 input[name="cf-turnstile-response"] 的可见父容器并点击。
+    # 弹框内的 Turnstile 经常 iframe 没渲染或隐藏，但 input 一定存在。
+    try:
+        ok = sb.execute_script("""
+            (function() {
+                var inp = document.querySelector('input[name="cf-turnstile-response"]');
+                if (!inp) return null;
+                var el = inp;
+                for (var i = 0; i < 16; i++) {
+                    el = el.parentElement;
+                    if (!el) break;
+                    var rect = el.getBoundingClientRect();
+                    if (rect.width >= 50 && rect.height >= 50 && rect.x >= 0 && rect.y >= 0) {
+                        ['mousedown','mouseup','click'].forEach(function(t){
+                            el.dispatchEvent(new MouseEvent(t, {bubbles:true, cancelable:true,
+                                clientX: rect.x + rect.width/2, clientY: rect.y + rect.height/2, view: window}));
+                        });
+                        return {w: rect.width, h: rect.height, x: rect.x, y: rect.y};
+                    }
+                }
+                return null;
+            })();
+        """)
+        if ok:
+            print(f"  🖱️ 已用 JS 点击 cf-turnstile-response 容器: {ok}")
+            _rand_sleep(1.0, 2.0)
+            if _ts_solved(sb): return
+    except Exception as e:
+        print(f"  ⚠️ JS 点击容器失败: {e}")
+
+    # 次优先：等 iframe 实际渲染后再定位点击（弹框内常需加载完才出现）
+    for _ in range(10):
+        ready = sb.execute_script("""
+            (function(){
+                var iframes = document.querySelectorAll('iframe');
+                for (var i = 0; i < iframes.length; i++) {
+                    var src = iframes[i].src || '';
+                    if (src.includes('challenges.cloudflare.com')) {
+                        var r = iframes[i].getBoundingClientRect();
+                        if (r.width > 30 && r.height > 30) return true;
+                    }
+                }
+                return false;
+            })();
+        """)
+        if ready:
+            break
+        print("  ⏳ 等待 Turnstile iframe 渲染...")
+        time.sleep(0.8)
 
     # 策略1：SeleniumBase 自带的 undetected 能力
     try:
@@ -249,7 +325,7 @@ def _click_turnstile(sb):
                 var list = document.querySelectorAll('iframe');
                 for (var i = 0; i < list.length; i++) {
                     var src = list[i].src || '';
-                    if (src.includes('challenges.cloudflare.com') || src.includes('turnstile')) {
+                    if (src.includes('challenges.cloudflare.com')) {
                         var r = list[i].getBoundingClientRect();
                         var cs = window.getComputedStyle(list[i]);
                         return {index: i, x: r.x, y: r.y, w: r.width, h: r.height,
@@ -323,7 +399,7 @@ def _click_turnstile(sb):
                 var iframes = document.querySelectorAll('iframe');
                 for (var i = 0; i < iframes.length; i++) {
                     var src = iframes[i].src || '';
-                    if (src.includes('challenges.cloudflare.com') || src.includes('turnstile')) {
+                    if (src.includes('challenges.cloudflare.com')) {
                         var r = iframes[i].getBoundingClientRect();
                         if (r.width > 30 && r.height > 30) {
                             ['mousedown','mouseup','click'].forEach(function(t){
@@ -375,7 +451,7 @@ def _click_turnstile(sb):
                 var iframes = document.querySelectorAll('iframe');
                 for (var i = 0; i < iframes.length; i++) {
                     var src = iframes[i].src || '';
-                    if (src.includes('challenges.cloudflare.com') || src.includes('turnstile')) {
+                    if (src.includes('challenges.cloudflare.com')) {
                         var r = iframes[i].getBoundingClientRect();
                         if (r.width > 30 && r.height > 30)
                             return {cx: Math.round(r.x + r.width/2), cy: Math.round(r.y + r.height/2)};
@@ -413,22 +489,35 @@ def _click_turnstile(sb):
         print(f"  ⚠️ xdotool 点击也失败: {e}")
 
 
-def handle_turnstile(sb, current_url: str = "") -> bool:
+def handle_turnstile(sb, current_url: str = "", no_refresh: bool = False,
+                     on_retry: Optional[Callable[[], bool]] = None,
+                     max_retry: int = 2) -> bool:
+    """处理 Turnstile 验证。
+    current_url: 需要刷新重置时跳转的 URL（弹框模式请传空并设 no_refresh=True）
+    no_refresh:  True 表示不刷新页面（用于弹框内，刷新会关闭弹框）
+    on_retry:    当某次尝试失败需要重新触发时的回调函数，返回 True 表示已重新触发
+    max_retry:   弹框模式下最多重触发弹框的次数（默认 2，避免短时高频点击被风控/封节点）
+
+    注意：弹框模式下绝对不会刷新页面，也不会无限重触发弹框。达到 max_retry 上限
+    后直接返回失败，交由上层决定是否放弃该服务器续期，绝不会要求重启工作流。"""
     print("🔍 处理 Turnstile 验证...")
+    print(f"  [配置] no_refresh={no_refresh} max_retry={max_retry} 当前时间={now_str()}")
+    t0 = time.time()
     # 先给 Turnstile 充分初始化时间，invisible 版本经常需要 5~10 秒才能出 token
     time.sleep(4)
     if _ts_solved(sb):
-        print("  ✅ 已静默通过")
+        print(f"  ✅ 已静默通过（耗时 {time.time()-t0:.1f}s）")
         return True
     for _ in range(3):
         sb.execute_script(_EXPAND_JS)
         _humanize(sb)
         time.sleep(1.0)
+    retry_count = 0
     for attempt in range(6):
         if _ts_solved(sb):
-            print(f"  ✅ Turnstile 通过（第{attempt+1}次）")
+            print(f"  ✅ Turnstile 通过（第{attempt+1}次，耗时 {time.time()-t0:.1f}s）")
             return True
-        print(f"\n  🔄 Turnstile 第 {attempt+1}/6 次尝试...")
+        print(f"\n  🔄 Turnstile 第 {attempt+1}/6 次尝试... [{now_str()}]")
         sb.execute_script(_EXPAND_JS)
         _humanize(sb)
         time.sleep(0.8)
@@ -437,11 +526,37 @@ def handle_turnstile(sb, current_url: str = "") -> bool:
         for _ in range(12):
             time.sleep(1.0)
             if _ts_solved(sb):
-                print(f"  ✅ Turnstile 通过（第{attempt+1}次）")
+                print(f"  ✅ Turnstile 通过（第{attempt+1}次，耗时 {time.time()-t0:.1f}s）")
                 return True
-        print(f"  ⚠️ 第{attempt+1}次未通过")
-        # 若还有 URL 且未解决，第3、5次刷新页面重新来
-        if current_url and attempt in [2, 4]:
+        print(f"  ⚠️ 第{attempt+1}次未通过（已等待）")
+
+        # 如果指定了 no_refresh（弹框模式），通过回调重新触发弹框，而不是刷新页面
+        if no_refresh and on_retry:
+            if retry_count >= max_retry:
+                print(f"  🛑 已达重触发弹框上限 max_retry={max_retry}，停止重试以避免触发风控/封节点")
+                break
+            retry_count += 1
+            print(f"  🔄 第 {retry_count}/{max_retry} 次重新触发 Renew Server 弹框... [{now_str()}]")
+            try:
+                if on_retry():
+                    print(f"    ✅ 弹框已重新触发（第{retry_count}次）")
+                    # 等待弹框重新加载
+                    waited = 0
+                    for _ in range(15):
+                        if _ts_exists(sb):
+                            break
+                        time.sleep(1.0)
+                        waited += 1
+                    print(f"    ⏳ 等待弹框 Turnstile 加载完成（{waited}s）")
+                    time.sleep(2)
+                else:
+                    print(f"    ⚠️ 第{retry_count}次重新触发弹框失败")
+            except Exception as e:
+                print(f"    ⚠️ 重新触发弹框异常: {e}")
+            continue
+
+        # 普通页面模式：第3、5次刷新页面重新来
+        if not no_refresh and current_url and attempt in [2, 4]:
             print("  🔄 刷新页面重置 Turnstile...")
             try:
                 sb.uc_open_with_reconnect(current_url, reconnect_time=3)
@@ -452,7 +567,7 @@ def handle_turnstile(sb, current_url: str = "") -> bool:
                     time.sleep(1.0)
             except Exception as e:
                 print(f"  ⚠️ 刷新失败: {e}")
-    print("  ❌ Turnstile 6次均失败")
+    print(f"  ❌ Turnstile 验证失败（共尝试 6 次 + 重触发 {retry_count} 次，耗时 {time.time()-t0:.1f}s）")
     _dump_turnstile_state(sb, "最终")
     take_screenshot(sb, "turnstile_fail.png")
     return False
@@ -470,8 +585,9 @@ def get_time_left(sb) -> str:
             if t:
                 return t
             time.sleep(0.5)
-    except:
-        pass
+        print("  ⚠️ #nextRenewalTime 已加载但内容为空")
+    except Exception as e:
+        print(f"  ⚠️ 读取 #nextRenewalTime 失败: {e}")
     try:
         t = sb.execute_script("""
             (function() {
@@ -553,16 +669,29 @@ def click_renew_button(sb) -> bool:
 
 
 def _check_renew_result(sb):
-    """检测续期弹窗结果：success / cooldown / None"""
+    """检测续期弹窗/弹框结果：success / cooldown / None"""
     try:
         return sb.execute_script("""
             (function() {
-                var t = document.body.innerText || '';
-                if (t.includes('cooldown') || t.includes('too soon') || t.includes('wait')) return 'cooldown';
-                if (t.includes('success') || t.includes('Success') || t.includes('renewed')) return 'success';
+                var allText = document.body.innerText || '';
+                // 弹框优先级更高：优先读取弹框内的文字
+                var modals = document.querySelectorAll('div[role="dialog"], div[role="alertdialog"], .modal, [class*="modal"], [class*="dialog"], [class*="Dialog"]');
+                for (var m = 0; m < modals.length; m++) {
+                    var mt = modals[m].innerText || '';
+                    if (mt) allText = mt + '\\n' + allText;
+                    var mbtns = modals[m].querySelectorAll('button');
+                    for (var i = 0; i < mbtns.length; i++) {
+                        var txt = mbtns[i].innerText.trim();
+                        if (txt.includes('Close') || txt.includes('OK') || txt.includes('Confirm') || txt.includes('Done'))
+                            return 'success';
+                    }
+                }
+                if (/cooldown|too soon|wait|please wait|try again later/i.test(allText)) return 'cooldown';
+                if (/success|renewed|completed|confirmed|server renewed/i.test(allText)) return 'success';
                 var btns = document.querySelectorAll('button');
                 for (var i = 0; i < btns.length; i++) {
-                    if (btns[i].innerText.includes('Close') || btns[i].innerText.includes('OK'))
+                    var txt = btns[i].innerText.trim();
+                    if (txt.includes('Close') || txt.includes('OK'))
                         return 'success';
                 }
                 return null;
@@ -586,7 +715,7 @@ def renew_server(sb, server: dict) -> bool:
     print("-" * 40)
 
     # ① 直接打开服务器详情页
-    print(f"🌐 访问: {server_url}")
+    print(f"🌐 访问: {server_url}  [{now_str()}]")
     sb.uc_open_with_reconnect(server_url, reconnect_time=4)
     time.sleep(4)
     take_screenshot(sb, f"{prefix}_loaded.png")
@@ -595,8 +724,27 @@ def renew_server(sb, server: dict) -> bool:
     time_left = get_time_left(sb)
     print(f"⏱️  当前剩余时间: {time_left or '未读取到'}")
 
-    # ③ 点击续期按钮
+    # ③ 点击续期按钮（先确保没有残留弹框，避免重复点击叠加）
     print("🔍 查找续期按钮...")
+    # 防御：开始前若已有弹框，先尝试关闭，避免重复点击产生多个弹框
+    try:
+        existing = sb.execute_script("""
+            (function(){
+                var boxes = document.querySelectorAll('div[role="dialog"], div[role="alertdialog"], .modal, [class*="modal"], [class*="dialog"], [class*="Dialog"]');
+                if (boxes.length === 0) return 0;
+                for (var i = 0; i < boxes.length; i++) {
+                    var close = boxes[i].querySelector('button, svg, [class*="close"], [aria-label*="close" i]');
+                    if (close) close.click();
+                }
+                return boxes.length;
+            })();
+        """)
+        if existing:
+            print(f"  ℹ️ 检测到 {existing} 个残留弹框，已在点击前关闭")
+            _rand_sleep(0.5, 1.0)
+    except Exception as e:
+        print(f"  ⚠️ 检查/关闭残留弹框异常（可忽略）: {e}")
+
     if not click_renew_button(sb):
         # 打印页面所有按钮帮助调试
         btns = sb.execute_script("""
@@ -614,22 +762,24 @@ def renew_server(sb, server: dict) -> bool:
     time.sleep(3)
     take_screenshot(sb, f"{prefix}_after_click.png")
 
-    # ④ 等待 Turnstile
-    print("⏳ 等待 Turnstile...")
+    # ④ 等待弹框内的 Turnstile 加载（不能刷新页面，否则弹框会消失）
+    print(f"⏳ 等待 Turnstile 加载（最多 30s，不刷新页面）... [{now_str()}]")
     ts_found = False
-    for _ in range(20):
+    pre_result = None
+    for _ in range(30):
         if _ts_exists(sb):
-            print("✅ 检测到 Turnstile")
+            print(f"✅ 检测到 Turnstile（第 {_+1}s）")
             ts_found = True
             break
         # 提前检查是否已出现结果弹窗
         r = _check_renew_result(sb)
         if r:
-            print(f"ℹ️  点击后直接出现结果: {r}")
+            pre_result = r
+            print(f"ℹ️  点击后直接出现结果: {r}（第 {_+1}s）")
             break
         time.sleep(1)
 
-    if not ts_found and not _ts_exists(sb):
+    if not ts_found and not pre_result:
         r = _check_renew_result(sb)
         if r == "success":
             print("🎉 续期成功（无需 Turnstile）！")
@@ -641,37 +791,83 @@ def renew_server(sb, server: dict) -> bool:
         send_tg(f"🖥 {name}\n❌ Turnstile 未出现\n时间: {now_str()}")
         return False
 
-    # ⑤ 处理 Turnstile
-    if not handle_turnstile(sb, server_url):
+    # ⑤ 处理 Turnstile（弹框模式：不刷新页面，失败时重新点击 Renew Server 触发弹框）
+    def retry_renew_modal():
+        print("    重新查找并点击 Renew Server... [重触发弹框]")
+        try:
+            sb.execute_script("""
+                (function(){
+                    // 先尝试关闭已打开的弹框
+                    var boxes = document.querySelectorAll('div[role="dialog"], div[role="alertdialog"], .modal, [class*="modal"], [class*="dialog"], [class*="Dialog"]');
+                    for (var i = 0; i < boxes.length; i++) {
+                        var close = boxes[i].querySelector('button, svg, [class*="close"], [aria-label*="close" i]');
+                        if (close) close.click();
+                    }
+                })();
+            """)
+            _rand_sleep(0.5, 1.0)
+        except Exception as e:
+            print(f"    关闭旧弹框失败（可忽略）: {e}")
+        ok = click_renew_button(sb)
+        if ok:
+            print("    ✅ 已重新点击 Renew Server 触发弹框")
+        else:
+            print("    ⚠️ 重新点击 Renew Server 失败（可能弹框已不在页面上）")
+        return ok
+
+    if not handle_turnstile(sb, current_url="", no_refresh=True,
+                             on_retry=retry_renew_modal, max_retry=2):
         take_screenshot(sb, f"{prefix}_ts_fail.png")
-        send_tg(f"🖥 {name}\n❌ Turnstile 验证失败\n时间: {now_str()}")
+        send_tg(f"🖥 {name}\n❌ Turnstile 验证失败（未重跑工作流，已自动停止重试以保护节点）\n时间: {now_str()}")
         return False
 
-    # ⑥ 等待提交结果
-    print("⏳ 等待续期结果...")
+    # ⑥ 等待提交结果（弹框内）
+    print(f"⏳ 等待续期结果... [{now_str()}]")
     start = time.time()
-    while time.time() - start < 30:
+    final_status = "unknown"
+    while time.time() - start < 40:
         r = _check_renew_result(sb)
         if r == "success":
             print("🎉 检测到成功结果！")
+            final_status = "success"
             break
         if r == "cooldown":
             print("⏳ 冷却期内")
+            final_status = "cooldown"
             break
         time.sleep(1)
 
     time.sleep(2)
     take_screenshot(sb, f"{prefix}_result.png")
 
-    # ⑦ 刷新页面读取新时间
+    # ⑦ 关闭可能的弹框后再刷新页面读取新时间（不要直接刷新，避免弹框阻塞）
     print("🔄 刷新页面确认剩余时间...")
+    try:
+        sb.execute_script("""
+            (function(){
+                var closeBtns = document.querySelectorAll('button, svg, [class*="close"], [aria-label*="close" i]');
+                for (var i = 0; i < closeBtns.length; i++) {
+                    var t = closeBtns[i].innerText || closeBtns[i].getAttribute('aria-label') || '';
+                    if (/close|×|x/i.test(t)) { closeBtns[i].click(); break; }
+                }
+            })();
+        """)
+        _rand_sleep(0.5, 1.0)
+    except Exception as e:
+        print(f"  ⚠️ 关闭弹框失败（可忽略）: {e}")
+
     sb.uc_open_with_reconnect(server_url, reconnect_time=3)
     time.sleep(4)
     new_time = get_time_left(sb)
     print(f"⏱️  续期后剩余时间: {new_time or '未读取到'}")
     take_screenshot(sb, f"{prefix}_final.png")
 
-    send_tg(f"🖥 {name}\n✅ 续期完成\n⏱️ 剩余: {new_time or '未知'}\n时间: {now_str()}")
+    if final_status == "success":
+        send_tg(f"🖥 {name}\n✅ 续期完成\n⏱️ 剩余: {new_time or '未知'}\n时间: {now_str()}")
+    elif final_status == "cooldown":
+        send_tg(f"🖥 {name}\nℹ️ 冷却中，无需续期\n⏱️ 剩余: {new_time or '未知'}\n时间: {now_str()}")
+    else:
+        send_tg(f"🖥 {name}\n⚠️ 未检测到明确续期结果，请查看截图\n⏱️ 剩余: {new_time or '未知'}\n时间: {now_str()}")
     return True
 
 
@@ -831,16 +1027,36 @@ def main():
         print("-" * 40)
 
         results = {}
-        for server in TARGET_SERVERS:
-            results[server["id"]] = renew_server(sb, server)
+        for idx, server in enumerate(TARGET_SERVERS):
+            print(f"\n### 进度 {idx+1}/{len(TARGET_SERVERS)}: {server['name']} ### [{now_str()}]")
+            try:
+                results[server["id"]] = renew_server(sb, server)
+            except Exception as e:
+                # 单个服务器异常不中断整体，避免连锁失败 + 无谓重启
+                print(f"❌ 续期 {server['name']} 抛出异常: {e}")
+                results[server["id"]] = False
+                send_tg(f"🖥 {server['name']}\n❌ 续期过程异常: {str(e)[:200]}\n时间: {now_str()}")
+                try:
+                    take_screenshot(sb, f"server_{server['id']}_exception.png")
+                except Exception:
+                    pass
+            # 服务器之间有间隔，避免短时高频请求触发风控
+            _rand_sleep(1.5, 3.0)
 
         print("=" * 40)
         print("📊 续期结果汇总：")
+        ok_count = 0
         for s in TARGET_SERVERS:
             status = "🎉 成功" if results[s["id"]] else "❌ 失败"
+            if results[s["id"]]:
+                ok_count += 1
             print(f"  {s['name']}: {status}")
+        print(f"  ── 共 {len(TARGET_SERVERS)} 台，成功 {ok_count} 台")
         print("=" * 40)
-        print("👋 完成")
+        print("👋 完成（本次运行已尽量自动重试，无需重启工作流）")
+        if ok_count < len(TARGET_SERVERS):
+            send_tg(f"📊 续期汇总：{ok_count}/{len(TARGET_SERVERS)} 成功\n"
+                    f"失败的服务器请查看日志与截图，无需重启工作流，下次定时运行会自动再试\n时间: {now_str()}")
 
 
 if __name__ == "__main__":
