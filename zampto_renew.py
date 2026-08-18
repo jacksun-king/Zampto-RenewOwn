@@ -1109,14 +1109,36 @@ def _goto_server_detail(sb, server_url: str, sid) -> str:
 
     # 无法识别：打印页面文本帮助诊断
     try:
-        txt = sb.execute_script("return (document.body.innerText||'').slice(0,600);")
-        print(f"  📄 页面文本片段: {txt!r}")
-        frames = sb.execute_script("return Array.from(document.querySelectorAll('iframe')).map(f=>f.src).slice(0,5);")
-        print(f"  📑 iframes: {frames}")
+        txt = sb.execute_script("return (document.body.innerText||'').slice(0,2000);")
+        print(f"  📄 页面文本片段(2000): {txt!r}")
+        kw = sb.execute_script("""
+            (function(){
+                var RE=/renew|expir|last renewed|续期|冷却|Renew Server/i;
+                var seen={}, out=[];
+                Array.from(document.querySelectorAll('div,span,button,a,h1,h2,h3,h4,p,td,th')).forEach(function(el){
+                    var t=(el.textContent||'').trim();
+                    if(t && t.length>1 && t.length<80 && RE.test(t) && el.children.length===0 && !seen[t]){
+                        seen[t]=1; out.push(t);
+                    }
+                });
+                return out.slice(0,30);
+            })();
+        """)
+        print(f"  🔑 Renew/Expiry 相关元素: {kw}")
+        frames = sb.execute_script("return Array.from(document.querySelectorAll('iframe')).map(f=>(f.src||'').slice(0,60)).filter(s=>!s.includes('pagead')).slice(0,5);")
+        print(f"  📑 非广告 iframes: {frames}")
     except Exception as e:
         print(f"  ⚠️ 页面诊断失败: {e}")
     try:
         print(f"  📍 URL-3: {_cur()}")
+    except Exception:
+        pass
+    # 详情页特征（页面文本含服务器名/基本属性）→ 视为已进入详情页
+    try:
+        txt = sb.execute_script("return (document.body.innerText||'');")
+        if ("Basic Information" in txt or "Back to Servers" in txt) and "Active" in txt:
+            print("  ✅ 已识别为服务器详情页（Basic Information 特征）")
+            return "ok"
     except Exception:
         pass
     return "unknown"
