@@ -882,55 +882,67 @@ def renew_server(sb, server: dict) -> bool:
 
 
 # ============================================================
-#   登录（对齐 wode808 的两步 identifier 流程）
+#   登录（邮箱 + 密码同一页，单页提交）
 # ============================================================
+def _is_logged_in_url(url: str) -> bool:
+    lower_url = url.lower()
+    logged_in_paths = ["/homepage", "/dashboard", "/home", "/console", "/servers", "/overview", "/main"]
+    auth_paths = ["/auth/login", "/auth/signin", "/sign-in", "/login", "/register"]
+    if any(p in lower_url for p in logged_in_paths):
+        return True
+    if DOMAIN in lower_url and not any(p in lower_url for p in auth_paths):
+        return True
+    return False
+
+
+def _wait_login_turnstile(sb, label: str, timeout: int = 8) -> bool:
+    """等待并处理登录页出现的 Turnstile，最多处理一次。"""
+    print(f"🔍 {label} Turnstile 检测中（最多等 {timeout}s）...")
+    for i in range(timeout * 2):
+        if _ts_exists(sb, label):
+            print(f"🔍 {label} 检测到 Turnstile，处理中...")
+            if not handle_turnstile(sb, current_url="", no_refresh=True, max_retry=0):
+                take_screenshot(sb, f"login_{label.replace(' ', '_')}_ts_fail.png")
+                send_tg(f"❌ {label} Turnstile 验证失败\n时间: {now_str()}")
+                return False
+            print(f"✅ {label} Turnstile 处理完成")
+            return True
+        time.sleep(0.5)
+    print(f"  ℹ️ {label} 未出现 Turnstile")
+    return True
+
+
 def do_login(sb) -> bool:
     print(f"🚀 访问登录页: {LOGIN_URL}")
     sb.uc_open_with_reconnect(LOGIN_URL, reconnect_time=4)
     time.sleep(3)
 
-    # 登录页可能有 Turnstile：给足加载时间，尤其 GitHub Actions 冷启动较慢
-    print("🔍 阶段1：检测登录页 Turnstile...")
-    ts_found = False
-    for i in range(20):
-        time.sleep(0.5)
-        if _ts_exists(sb, "登录页初始"):
-            ts_found = True
-            break
-        if i == 9:
-            print("  ⏳ 登录页 Turnstile 仍未出现，继续等待...")
-    if ts_found:
-        print("🔍 登录页检测到 Turnstile，处理中...")
-        # 登录页不刷新，避免清空已填表单
-        if not handle_turnstile(sb, current_url="", no_refresh=True, max_retry=0):
-            take_screenshot(sb, "login_ts_fail.png")
-            send_tg(f"❌ 登录页 Turnstile 验证失败\n时间: {now_str()}")
-            return False
-        print("✅ 登录页 Turnstile 处理完成")
-    else:
-        print("  ℹ️ 登录页未检测到 Turnstile（可能为 invisible 或提交后才加载）")
+    # 登录页 Turnstile（邮箱+密码同一页，只检测这一次）
+    if not _wait_login_turnstile(sb, "登录页", timeout=10):
+        return False
 
-    # 第一步：输入账号（邮箱），提交。兼容 identifier / email / type=email 多种表单
+    # 输入账号（邮箱）
     print("⌨️  输入账号...")
+    account_selector = None
+    for sel in ['input[name="identifier"]', 'input[name="email"]', 'input[type="email"]', 'input#email', 'input[inputmode="email"]']:
+        if sb.is_element_present(sel):
+            account_selector = sel
+            print(f"   使用账号输入框: {sel}")
+            break
+    if not account_selector:
+        print("❌ 未找到邮箱/账号输入框 (identifier/email)")
+        take_screenshot(sb, "login_fail.png")
+        return False
     try:
-        account_selector = None
-        for sel in ['input[name="identifier"]', 'input[name="email"]', 'input[type="email"]', 'input#email', 'input[inputmode="email"]']:
-            if sb.is_element_present(sel):
-                account_selector = sel
-                print(f"   使用账号输入框: {sel}")
-                break
-        if not account_selector:
-            raise Exception("未找到邮箱/账号输入框 (identifier/email)")
         sb.wait_for_element_visible(account_selector, timeout=15)
         sb.type(account_selector, ZAMPTO_ACCOUNT)
-        sb.click('button[type="submit"]')
     except Exception as e:
         print(f"❌ 账号输入失败: {e}")
         take_screenshot(sb, "login_fail.png")
         return False
 
-    # 等待密码页
-    print("⏳ 等待密码页...")
+    # 同一页输入密码
+    print("⌨️  输入密码...")
     pw_selector = None
     for sel in ['input[name="password"]', 'input[type="password"]', 'input#password']:
         if sb.is_element_present(sel):
@@ -938,42 +950,16 @@ def do_login(sb) -> bool:
             print(f"   使用密码输入框: {sel}")
             break
     if not pw_selector:
-        print("❌ 密码页未出现或未找到密码输入框")
-        take_screenshot(sb, "password_page_fail.png")
+        print("❌ 未找到密码输入框")
+        take_screenshot(sb, "login_fail.png")
         return False
-
-    # 密码页可能有 Turnstile
-    print("🔍 阶段2：检测密码页 Turnstile...")
-    ts_found = False
-    for i in range(15):
-        time.sleep(0.5)
-        if _ts_exists(sb, "密码页"):
-            ts_found = True
-            break
-    if ts_found:
-        print("🔍 密码页检测到 Turnstile，处理中...")
-        if not handle_turnstile(sb, current_url="", no_refresh=True, max_retry=0):
-            take_screenshot(sb, "password_ts_fail.png")
-            send_tg(f"❌ 密码页 Turnstile 验证失败\n时间: {now_str()}")
-            return False
-        print("✅ 密码页 Turnstile 处理完成")
-    else:
-        print("  ℹ️ 密码页未检测到 Turnstile")
-
-    # 第二步：输入密码，提交
-    print("⌨️  输入密码...")
-    sb.wait_for_element_visible(pw_selector, timeout=15)
-    sb.type(pw_selector, ZAMPTO_PASSWORD)
-
-    # 点登录前最后再检测一次 Turnstile（有些站点在填完密码后才渲染）
-    print("🔍 阶段3：登录提交前最终检测 Turnstile...")
-    if _ts_exists(sb, "提交前"):
-        print("🔍 提交前检测到 Turnstile，先处理再点击登录...")
-        if not handle_turnstile(sb, current_url="", no_refresh=True, max_retry=0):
-            take_screenshot(sb, "login_pre_submit_ts_fail.png")
-            send_tg(f"❌ 登录提交前 Turnstile 验证失败\n时间: {now_str()}")
-            return False
-        print("✅ 提交前 Turnstile 处理完成")
+    try:
+        sb.wait_for_element_visible(pw_selector, timeout=15)
+        sb.type(pw_selector, ZAMPTO_PASSWORD)
+    except Exception as e:
+        print(f"❌ 密码输入失败: {e}")
+        take_screenshot(sb, "login_fail.png")
+        return False
 
     # 提交按钮多选择器兼容
     submit_ok = False
@@ -988,36 +974,27 @@ def do_login(sb) -> bool:
         sb.type(pw_selector, "\n")
         print("   未找到提交按钮，使用回车提交")
 
-    # 阶段4：提交后等待跳转，期间持续检测 Turnstile
+    # 提交后等待跳转：先给 5s 正常跳转，若仍在登录页再处理一次 Turnstile
     print("⏳ 等待跳转登录成功...")
-    logged_in_paths = ["/homepage", "/dashboard", "/home", "/console", "/servers", "/overview", "/main"]
-    auth_paths = ["/auth/login", "/auth/signin", "/sign-in", "/login", "/register"]
     ts_handled_after_submit = False
     for i in range(60):
         try:
             url = sb.get_current_url()
-            lower_url = url.lower()
-            # 明确的登录后路径
-            if any(p in lower_url for p in logged_in_paths):
+            if _is_logged_in_url(url):
                 print(f"✅ 登录成功: {url}")
                 return True
-            # 兜底：仍在目标域名内，且已离开所有登录/注册页
-            if DOMAIN in lower_url and not any(p in lower_url for p in auth_paths):
-                print(f"✅ 登录成功（已离开登录页）: {url}")
-                return True
 
-            # 若仍在登录页且检测到 Turnstile，处理它（不刷新，避免清空表单）
-            if not ts_handled_after_submit and any(p in lower_url for p in auth_paths):
-                if _ts_exists(sb, f"提交后第{i}s"):
-                    print(f"🔍 登录提交后检测到 Turnstile（第{i}s），处理中...")
-                    if handle_turnstile(sb, current_url="", no_refresh=True, max_retry=0):
-                        ts_handled_after_submit = True
-                        print("✅ 提交后 Turnstile 处理完成，继续等待跳转...")
-                    else:
-                        print("❌ 提交后 Turnstile 处理失败")
-                        take_screenshot(sb, "login_after_submit_ts_fail.png")
-                        send_tg(f"❌ 登录提交后 Turnstile 验证失败\n时间: {now_str()}")
-                        return False
+            # 5s 后仍卡在登录页，且检测到 Turnstile，处理一次（不刷新）
+            if i >= 10 and not ts_handled_after_submit and _ts_exists(sb, "提交后"):
+                print(f"🔍 提交后仍停留在登录页，检测到 Turnstile，处理中...")
+                if handle_turnstile(sb, current_url="", no_refresh=True, max_retry=0):
+                    ts_handled_after_submit = True
+                    print("✅ 提交后 Turnstile 处理完成，继续等待跳转...")
+                else:
+                    print("❌ 提交后 Turnstile 处理失败")
+                    take_screenshot(sb, "login_after_submit_ts_fail.png")
+                    send_tg(f"❌ 登录提交后 Turnstile 验证失败\n时间: {now_str()}")
+                    return False
         except Exception:
             pass
         time.sleep(0.5)
