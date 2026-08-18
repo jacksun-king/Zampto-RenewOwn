@@ -4,6 +4,7 @@
 import time
 import os
 import json
+import shutil
 import requests
 import subprocess
 from datetime import datetime
@@ -210,7 +211,34 @@ def _ts_solved(sb):
         return False
 
 
+def _have_xdotool():
+    return bool(shutil.which("xdotool"))
+
+
+def _py_xclick(x, y) -> bool:
+    """python-xlib XTEST 模拟真实点击（无 xdotool 时的兜底，Xvfb 单屏环境足够）。"""
+    try:
+        from Xlib import display, X
+        from Xlib.ext import xtest
+        d = display.Display()
+        root = d.screen().root
+        root.warp_pointer(x, y)
+        d.sync()
+        xtest.fake_input(d, X.ButtonPress, 1)
+        d.sync()
+        xtest.fake_input(d, X.ButtonRelease, 1)
+        d.sync()
+        d.close()
+        return True
+    except Exception as e:
+        print(f"  ⚠️ python-xlib 点击失败: {e}")
+        return False
+
+
 def _activate_win():
+    if not _have_xdotool():
+        # 无 xdotool：Xvfb 无窗口管理器，无需激活窗口，直接点击坐标即可
+        return
     try:
         r = subprocess.run(["xdotool", "search", "--onlyvisible", "--class", "chrome"],
                            capture_output=True, text=True, timeout=3)
@@ -224,13 +252,18 @@ def _activate_win():
 
 
 def _xclick(x, y):
-    _activate_win()
-    try:
-        subprocess.run(["xdotool", "mousemove", str(x), str(y)], timeout=2, stderr=subprocess.DEVNULL)
-        time.sleep(0.15)
-        subprocess.run(["xdotool", "click", "1"], timeout=2, stderr=subprocess.DEVNULL)
-    except:
-        os.system(f"xdotool mousemove {x} {y} click 1 2>/dev/null")
+    if _have_xdotool():
+        _activate_win()
+        try:
+            subprocess.run(["xdotool", "mousemove", str(x), str(y)], timeout=2, stderr=subprocess.DEVNULL)
+            time.sleep(0.15)
+            subprocess.run(["xdotool", "click", "1"], timeout=2, stderr=subprocess.DEVNULL)
+            return
+        except:
+            os.system(f"xdotool mousemove {x} {y} click 1 2>/dev/null")
+            return
+    # 无 xdotool 时用 python-xlib 模拟
+    _py_xclick(x, y)
 
 
 def _rand_sleep(a=0.3, b=0.8):

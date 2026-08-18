@@ -20,23 +20,35 @@ jobs:
           python-version: '3.x'
 
       - name: 🛠️ 安装系统依赖（Ubuntu runner 已自带 Chrome）
-        timeout-minutes: 6
+        timeout-minutes: 10
         run: |
-          # runner 已预装 google-chrome-stable，不再重复安装，避免卡在 Google 源
-          # 先试 Azure 镜像（默认），卡死/超时自动切回官方源重试，避免 apt 卡住整个 job
+          # runner 已预装 google-chrome-stable + Xvfb，尽量不依赖 apt；
+          # 缺 Xvfb 时才尝试多源 apt（azure→阿里→清华→官方），每源 75s 超时，装不上明确报错
+          if command -v Xvfb >/dev/null 2>&1 && command -v xvfb-run >/dev/null 2>&1; then
+            echo "✅ Xvfb / xvfb-run 已预装，跳过 apt 安装"
+            exit 0
+          fi
           install_deps() {
             sudo apt-get update -qq && \
-            sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
-              xvfb x11-utils xdotool
+            sudo apt-get install -y --no-install-recommends -o Acquire::Retries=2 \
+              xvfb xdotool
           }
-          sudo bash -c 'source /etc/os-release && echo "deb http://azure.archive.ubuntu.com/ubuntu/ ${VERSION_CODENAME} main restricted universe multiverse" > /etc/apt/sources.list'
-          sudo bash -c 'source /etc/os-release && echo "deb http://azure.archive.ubuntu.com/ubuntu/ ${VERSION_CODENAME}-updates main restricted universe multiverse" >> /etc/apt/sources.list'
-          sudo bash -c 'source /etc/os-release && echo "deb http://azure.archive.ubuntu.com/ubuntu/ ${VERSION_CODENAME}-security main restricted universe multiverse" >> /etc/apt/sources.list'
-          if ! timeout 240 bash -c "$(declare -f install_deps); install_deps"; then
-            echo "⚠️ Azure 镜像源超时/失败，切回官方源重试..."
-            sudo bash -c 'source /etc/os-release && printf "deb http://archive.ubuntu.com/ubuntu/ ${VERSION_CODENAME} main restricted universe multiverse\ndeb http://archive.ubuntu.com/ubuntu/ ${VERSION_CODENAME}-updates main restricted universe multiverse\ndeb http://archive.ubuntu.com/ubuntu/ ${VERSION_CODENAME}-security main restricted universe multiverse\n" > /etc/apt/sources.list'
-            timeout 240 bash -c "$(declare -f install_deps); install_deps"
-          fi
+          set_apt() {
+            MIRROR_="$1"
+            sudo bash -c 'M='"$MIRROR_"'; source /etc/os-release && printf "deb http://%s/ubuntu/ %s main restricted universe multiverse\ndeb http://%s/ubuntu/ %s-updates main restricted universe multiverse\ndeb http://%s/ubuntu/ %s-security main restricted universe multiverse\n" "$M" "$VERSION_CODENAME" "$M" "$VERSION_CODENAME" "$M" "$VERSION_CODENAME" > /etc/apt/sources.list'
+          }
+          for MIRROR in azure.archive.ubuntu.com mirrors.aliyun.com mirrors.tuna.tsinghua.edu.cn archive.ubuntu.com; do
+            echo "--- 尝试 apt 源: $MIRROR ---"
+            set_apt "$MIRROR"
+            if timeout 75 bash -c "$(declare -f install_deps); install_deps"; then
+              echo "✅ 使用 $MIRROR 安装成功"
+              exit 0
+            fi
+            echo "⚠️ $MIRROR 失败，换下一个源"
+          done
+          echo "❌ 所有 apt 源均不可用，无法安装 Xvfb"
+          command -v Xvfb || echo "Xvfb 缺失：脚本需要 xvfb-run 才能运行"
+          exit 1
 
       - name: ✅ 验证系统 Chrome
         run: |
@@ -52,7 +64,7 @@ jobs:
 
       - name: 🐍 安装 Python 依赖
         run: |
-          pip install --cache-dir ~/.cache/pip -i https://pypi.tuna.tsinghua.edu.cn/simple seleniumbase requests[socks]
+          pip install --cache-dir ~/.cache/pip -i https://pypi.tuna.tsinghua.edu.cn/simple seleniumbase requests[socks] python-xlib
           seleniumbase install chromedriver || true
 
       - name: 🛡️ 启动代理转发（支持 GOST / Hysteria2 节点链接）
