@@ -174,6 +174,29 @@ def _ts_exists(sb, label: str = "", detect_loading: bool = False):
         return False
 
 
+def _ts_real_present(sb, label: str = ""):
+    """只认真正的 Turnstile 元素（input 或 cloudflare iframe），不含 Loading 文本。
+    用于重触发后判断是否已真正出现、可以开始处理；见到 Loading 不算。"""
+    try:
+        present = bool(sb.execute_script("""
+            (function(){
+                var input = document.querySelector('input[name="cf-turnstile-response"]');
+                if (input) return true;
+                var frames = document.querySelectorAll('iframe');
+                for (var i = 0; i < frames.length; i++) {
+                    var src = frames[i].src || '';
+                    if (src.indexOf('challenges.cloudflare.com') !== -1) return true;
+                }
+                return false;
+            })();
+        """))
+        if present:
+            print(f"  [TS真实检测/{label or 'default'}] ✅ Turnstile 已真正出现")
+        return present
+    except Exception as e:
+        print(f"  [TS真实检测/{label or 'default'}] ⚠️ JS 异常: {e}")
+        return False
+
 def _ts_solved(sb):
     """检测 Turnstile token 是否已生成"""
     try:
@@ -510,7 +533,7 @@ def _click_turnstile(sb):
 
 def handle_turnstile(sb, current_url: str = "", no_refresh: bool = False,
                      on_retry: Optional[Callable[[], bool]] = None,
-                     max_retry: int = 2) -> bool:
+                     max_retry: int = 2, skip_wait: bool = False) -> bool:
     """处理 Turnstile 验证。
     current_url: 需要刷新重置时跳转的 URL（弹框模式请传空并设 no_refresh=True）
     no_refresh:  True 表示不刷新页面（用于弹框内，刷新会关闭弹框）
@@ -539,7 +562,11 @@ def handle_turnstile(sb, current_url: str = "", no_refresh: bool = False,
     # 此时应等待自动通过，而不是反复点击空气。
     ts_interactive = _ts_exists(sb, label="handle可交互检测")
     if not ts_interactive:
-        print("  ℹ️ 未检测到可交互 Turnstile 元素，等待自动通过（不点击空气）...")
+        if skip_wait:
+            # 上层已等满 3 分钟仍无 Turnstile：不再静默等待，直接进入重触发弹框流程
+            print("  ⚠️ 已等满 3 分钟仍无 Turnstile 元素，跳过静默等待，进入重触发流程")
+        else:
+            print("  ℹ️ 未检测到可交互 Turnstile 元素，等待自动通过（不点击空气）...")
         # 最多等 ~150s（2.5 分钟），期间一旦通过立即返回
         for i in range(150):
             time.sleep(1.0)
@@ -587,17 +614,20 @@ def handle_turnstile(sb, current_url: str = "", no_refresh: bool = False,
             try:
                 if on_retry():
                     print(f"    ✅ 弹框已重新触发（第{retry_count}次）")
-                    # 等待弹框重新加载：最多 3 分钟，期间一旦检测到 Turnstile 或通过就提前结束
+                    # 等待弹框重新加载：最多 3 分钟。
+                    # 注意：必须等真正的 Turnstile 元素/iframe 出现，或已静默通过(token)才停止等待；
+                    # 不能因为看到 "Loading security verification" 就提前停止——那只是加载中，并非可处理。
                     waited = 0
-                    print(f"    ⏳ 等待弹框 Turnstile 加载（最多 180s，检测到即停止）...")
+                    print(f"    ⏳ 等待弹框 Turnstile 真正出现（最多 180s；Loading 中不算，出现才停）...")
                     for _ in range(180):
-                        if _ts_exists(sb, label=f"重触发第{retry_count}次") or _ts_solved(sb):
+                        if (_ts_exists(sb, label=f"重触发第{retry_count}次") and
+                                _ts_real_present(sb)) or _ts_solved(sb):
                             break
                         time.sleep(1.0)
                         waited += 1
                         # 每 30s 打印一次进度
                         if waited % 30 == 0:
-                            print(f"      ...已等 {waited}s，Turnstile 尚未加载")
+                            print(f"      ...已等 {waited}s，Turnstile 尚未真正出现（仍在 Loading）")
                     print(f"    ⏳ 等待弹框 Turnstile 加载完成（{waited}s）")
                     time.sleep(2)
                 else:
@@ -822,7 +852,7 @@ def renew_server(sb, server: dict) -> bool:
     pre_result = None
     for _ in range(180):
         if _ts_exists(sb, label="弹框等待", detect_loading=True):
-            print(f"✅ Turnstile 已加载/加载中（第 {_+1}s）")
+            print(f"✅ 检测到 Loading/真正出现 Turnstile，停止等待循环，进入处理（第 {_+1}s）")
             ts_found = True
             break
         # 提前检查是否已出现结果弹窗
@@ -840,7 +870,7 @@ def renew_server(sb, server: dict) -> bool:
             time_left = get_time_left(sb)
             send_tg(f"🖥 {name}\n✅ 续期成功\n⏱️ 剩余: {time_left}\n时间: {now_str()}")
             return True
-        print(f"❌ 3 分钟内 Turnstile 未出现，将通过重触发续期按钮重试")
+        print(f"❌ 3 分钟内 Turnstile 未出现，交由重触发续期按钮重试")
         take_screenshot(sb, f"{prefix}_no_turnstile.png")
 
     # ⑤ 处理 Turnstile（弹框模式：不刷新页面，失败时重新点击 Renew Server 触发弹框）
@@ -875,7 +905,8 @@ def renew_server(sb, server: dict) -> bool:
         return ok
 
     if not handle_turnstile(sb, current_url="", no_refresh=True,
-                             on_retry=retry_renew_modal, max_retry=2):
+                             on_retry=retry_renew_modal, max_retry=2,
+                             skip_wait=(not ts_found)):
         take_screenshot(sb, f"{prefix}_ts_fail.png")
         send_tg(f"🖥 {name}\n❌ Turnstile 验证失败（未重跑工作流，已自动停止重试以保护节点）\n时间: {now_str()}")
         return False
