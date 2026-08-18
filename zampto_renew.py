@@ -157,38 +157,105 @@ def _xclick(x, y):
         os.system(f"xdotool mousemove {x} {y} click 1 2>/dev/null")
 
 
+def _rand_sleep(a=0.3, b=0.8):
+    time.sleep(a + (b - a) * (hash(str(time.time())) % 1000 / 1000.0))
+
+
 def _click_turnstile(sb):
-    """尝试点击 Turnstile。优先用 JS 内点击，失败再回退 xdotool 屏幕坐标。"""
-    # 方案1：纯 JS 点击 iframe 或容器（不依赖窗口坐标，xvfb 下更稳）
-    js_ok = False
+    """多策略点击 Turnstile：SeleniumBase 原生 > iframe 内真实点击 > JS 事件 > xdotool。"""
+    # 策略1：SeleniumBase 自带的 undetected 点击能力（uc_click/handle_turnstile）
+    try:
+        # 先展开/可见化，确保元素可交互
+        sb.execute_script(_EXPAND_JS)
+        _rand_sleep(0.2, 0.5)
+        # SeleniumBase 4.x 内置 handle_turnstile，在 uc=True 下通常有效
+        if hasattr(sb, "handle_turnstile"):
+            sb.handle_turnstile()
+            print("  🖱️ 已调用 SeleniumBase handle_turnstile")
+            _rand_sleep(0.5, 1.0)
+            if _ts_solved(sb):
+                return
+    except Exception as e:
+        print(f"  ⚠️ SeleniumBase handle_turnstile 未成功: {e}")
+
+    # 策略2：切进 Turnstile iframe，点击内部真实 checkbox（最可靠）
+    try:
+        iframe_info = sb.execute_script("""
+            (function() {
+                var list = document.querySelectorAll('iframe');
+                for (var i = 0; i < list.length; i++) {
+                    var src = list[i].src || '';
+                    if (src.includes('challenges.cloudflare.com') || src.includes('turnstile')) {
+                        var r = list[i].getBoundingClientRect();
+                        return {index: i, x: r.x, y: r.y, w: r.width, h: r.height};
+                    }
+                }
+                return null;
+            })();
+        """)
+        if iframe_info:
+            idx = iframe_info["index"]
+            # 尝试通过索引切 iframe
+            iframes = sb.find_elements("iframe")
+            if idx < len(iframes):
+                sb.switch_to_frame(iframes[idx])
+                _rand_sleep(0.3, 0.6)
+                # iframe 内通常只有一个 checkbox
+                for cb_sel in ['input[type="checkbox"]', '#challenge-stage', '.rc-checkbox']:
+                    try:
+                        sb.wait_for_element_visible(cb_sel, timeout=3)
+                        sb.uc_click(cb_sel)
+                        print(f"  🖱️ 已点击 iframe 内元素: {cb_sel}")
+                        sb.switch_to_default_content()
+                        _rand_sleep(0.8, 1.5)
+                        if _ts_solved(sb):
+                            return
+                        break
+                    except Exception:
+                        continue
+                sb.switch_to_default_content()
+    except Exception as e:
+        print(f"  ⚠️ iframe 内点击失败: {e}")
+        try:
+            sb.switch_to_default_content()
+        except Exception:
+            pass
+
+    # 策略3：JS 点击 iframe 或父容器（作为补充）
     try:
         js_ok = sb.execute_script("""
             (function() {
-                // 先尝试找到可见的 turnstile iframe 并点击
                 var iframes = document.querySelectorAll('iframe');
                 for (var i = 0; i < iframes.length; i++) {
                     var src = iframes[i].src || '';
-                    if (src.includes('cloudflare') || src.includes('turnstile')) {
+                    if (src.includes('challenges.cloudflare.com') || src.includes('turnstile')) {
                         var r = iframes[i].getBoundingClientRect();
                         if (r.width > 0 && r.height > 0) {
-                            iframes[i].dispatchEvent(new MouseEvent('click', {
-                                bubbles: true, clientX: r.x + 30, clientY: r.y + r.height/2
-                            }));
+                            ['mousedown','mouseup','click'].forEach(function(t){
+                                iframes[i].dispatchEvent(new MouseEvent(t, {
+                                    bubbles: true, cancelable: true,
+                                    clientX: r.x + r.width/2, clientY: r.y + r.height/2,
+                                    view: window
+                                }));
+                            });
                             return true;
                         }
                     }
                 }
-                // fallback: 点击 input 父容器
                 var inp = document.querySelector('input[name="cf-turnstile-response"]');
                 if (inp) {
                     var p = inp.parentElement;
-                    for (var j = 0; j < 10; j++) {
+                    for (var j = 0; j < 12; j++) {
                         if (!p) break;
                         var r = p.getBoundingClientRect();
                         if (r.width > 100 && r.height > 30) {
-                            p.dispatchEvent(new MouseEvent('click', {
-                                bubbles: true, clientX: r.x + 30, clientY: r.y + r.height/2
-                            }));
+                            ['mousedown','mouseup','click'].forEach(function(t){
+                                p.dispatchEvent(new MouseEvent(t, {
+                                    bubbles: true, cancelable: true,
+                                    clientX: r.x + 30, clientY: r.y + r.height/2,
+                                    view: window
+                                }));
+                            });
                             return true;
                         }
                         p = p.parentElement;
@@ -197,14 +264,15 @@ def _click_turnstile(sb):
                 return false;
             })();
         """)
+        if js_ok:
+            print("  🖱️ 已用 JS 点击 Turnstile")
+            _rand_sleep(0.8, 1.5)
+            if _ts_solved(sb):
+                return
     except Exception as e:
         print(f"  ⚠️ JS 点击 Turnstile 失败: {e}")
 
-    if js_ok:
-        print("  🖱️ 已用 JS 点击 Turnstile")
-        return
-
-    # 方案2：回退到 xdotool 屏幕坐标（需要 X 环境）
+    # 策略4：回退到 xdotool 屏幕坐标（需要 X 环境）
     print("  🖱️ 回退到 xdotool 点击...")
     try:
         coords = sb.execute_script("""
@@ -212,20 +280,20 @@ def _click_turnstile(sb):
                 var iframes = document.querySelectorAll('iframe');
                 for (var i = 0; i < iframes.length; i++) {
                     var src = iframes[i].src || '';
-                    if (src.includes('cloudflare') || src.includes('turnstile')) {
+                    if (src.includes('challenges.cloudflare.com') || src.includes('turnstile')) {
                         var r = iframes[i].getBoundingClientRect();
                         if (r.width > 0 && r.height > 0)
-                            return {cx: Math.round(r.x+30), cy: Math.round(r.y+r.height/2)};
+                            return {cx: Math.round(r.x + r.width/2), cy: Math.round(r.y + r.height/2)};
                     }
                 }
                 var inp = document.querySelector('input[name="cf-turnstile-response"]');
                 if (inp) {
                     var p = inp.parentElement;
-                    for (var j = 0; j < 10; j++) {
+                    for (var j = 0; j < 12; j++) {
                         if (!p) break;
                         var r = p.getBoundingClientRect();
                         if (r.width > 100 && r.height > 30)
-                            return {cx: Math.round(r.x+30), cy: Math.round(r.y+r.height/2)};
+                            return {cx: Math.round(r.x + 30), cy: Math.round(r.y + r.height/2)};
                         p = p.parentElement;
                     }
                 }
@@ -241,7 +309,8 @@ def _click_turnstile(sb):
         bar = wi["oh"] - wi["ih"]
         ax = coords["cx"] + wi["sx"]
         ay = coords["cy"] + wi["sy"] + bar
-        print(f"  🖱️ xdotool 点击 Turnstile ({ax}, {ay})  bar={bar}")
+        print(f"  🖱️ xdotool 点击 Turnstile ({ax}, {ay}) bar={bar}")
+        _activate_win()
         _xclick(ax, ay)
     except Exception as e:
         print(f"  ⚠️ xdotool 点击也失败: {e}")
