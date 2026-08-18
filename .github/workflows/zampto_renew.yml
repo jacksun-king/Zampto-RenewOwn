@@ -19,10 +19,19 @@ jobs:
         with:
           python-version: '3.x'
 
+      - name: 💾 缓存 apt 包
+        uses: actions/cache@v4
+        with:
+          path: |
+            /var/cache/apt/archives
+            /var/lib/apt/lists
+          key: apt-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: apt-${{ runner.os }}-
+
       - name: 🛠️ 安装系统依赖（Ubuntu runner 已自带 Chrome）
         run: |
           # runner 已预装 google-chrome-stable，不再重复安装，避免卡在 Google 源
-          sudo apt-get update -qq
+          sudo apt-get update -qq || true
           sudo apt-get install -y --no-install-recommends \
             xvfb \
             x11-utils \
@@ -36,8 +45,8 @@ jobs:
 
       - name: 🐍 安装 Python 依赖
         run: |
-          pip install seleniumbase
-          seleniumbase install chromedriver
+          pip install -i https://pypi.tuna.tsinghua.edu.cn/simple seleniumbase
+          seleniumbase install chromedriver || true
 
       - name: 🛡️ 启动 GOST 代理转发
         if: ${{ env.GOST_PROXY != '' }}
