@@ -127,31 +127,40 @@ _EXPAND_JS = """
 """
 
 
-def _ts_exists(sb):
+def _ts_exists(sb, label: str = ""):
     """检测页面或弹框内是否存在 Turnstile 相关元素。
     只认 Cloudflare Turnstile 的 input 或 challenges.cloudflare.com iframe，
-    避免把 googlesyndication 广告 iframe 误判为 Turnstile。"""
+    避免把 googlesyndication 广告 iframe 误判为 Turnstile。
+    label 用于在日志中标记当前检测阶段。"""
     try:
-        return bool(sb.execute_script("""
+        info = sb.execute_script("""
             return (function(){
-                if (document.querySelector('input[name="cf-turnstile-response"]')) return true;
+                var input = document.querySelector('input[name="cf-turnstile-response"]');
+                var inputFound = !!input;
+                var inputVisible = !!(input && input.offsetParent !== null);
+                var cfFrames = [];
                 function checkFrames(list) {
                     for (var i = 0; i < list.length; i++) {
                         var src = list[i].src || '';
-                        if (src.indexOf('challenges.cloudflare.com') !== -1) return true;
+                        if (src.indexOf('challenges.cloudflare.com') !== -1) {
+                            cfFrames.push(src.substring(0, 120));
+                        }
                     }
-                    return false;
                 }
-                if (checkFrames(document.querySelectorAll('iframe'))) return true;
-                // 弹框内兜底
+                checkFrames(document.querySelectorAll('iframe'));
                 var boxes = document.querySelectorAll('div[role="dialog"], div[role="alertdialog"], .modal, [class*="modal"], [class*="dialog"], [class*="Dialog"]');
                 for (var b = 0; b < boxes.length; b++) {
-                    if (checkFrames(boxes[b].querySelectorAll('iframe'))) return true;
+                    checkFrames(boxes[b].querySelectorAll('iframe'));
                 }
-                return false;
+                return {inputFound: inputFound, inputVisible: inputVisible, cfFrames: cfFrames};
             })();
-        """))
-    except:
+        """)
+        exists = bool(info.get("inputFound") or info.get("cfFrames"))
+        if exists:
+            print(f"  [TS检测/{label or 'default'}] ✅ 发现 Turnstile: inputFound={info.get('inputFound')} inputVisible={info.get('inputVisible')} cfFrames={len(info.get('cfFrames', []))}")
+        return exists
+    except Exception as e:
+        print(f"  [TS检测/{label or 'default'}] ⚠️ JS 执行异常: {e}")
         return False
 
 
@@ -879,16 +888,26 @@ def do_login(sb) -> bool:
     sb.uc_open_with_reconnect(LOGIN_URL, reconnect_time=4)
     time.sleep(3)
 
-    # 登录页可能有 Turnstile
-    for _ in range(10):
+    # 登录页可能有 Turnstile：给足加载时间，尤其 GitHub Actions 冷启动较慢
+    print("🔍 阶段1：检测登录页 Turnstile...")
+    ts_found = False
+    for i in range(20):
         time.sleep(0.5)
-        if _ts_exists(sb):
+        if _ts_exists(sb, "登录页初始"):
+            ts_found = True
             break
-    if _ts_exists(sb):
+        if i == 9:
+            print("  ⏳ 登录页 Turnstile 仍未出现，继续等待...")
+    if ts_found:
         print("🔍 登录页检测到 Turnstile，处理中...")
-        if not handle_turnstile(sb, LOGIN_URL):
+        # 登录页不刷新，避免清空已填表单
+        if not handle_turnstile(sb, current_url="", no_refresh=True, max_retry=0):
             take_screenshot(sb, "login_ts_fail.png")
+            send_tg(f"❌ 登录页 Turnstile 验证失败\n时间: {now_str()}")
             return False
+        print("✅ 登录页 Turnstile 处理完成")
+    else:
+        print("  ℹ️ 登录页未检测到 Turnstile（可能为 invisible 或提交后才加载）")
 
     # 第一步：输入账号（邮箱），提交。兼容 identifier / email / type=email 多种表单
     print("⌨️  输入账号...")
@@ -923,20 +942,38 @@ def do_login(sb) -> bool:
         return False
 
     # 密码页可能有 Turnstile
-    for _ in range(10):
+    print("🔍 阶段2：检测密码页 Turnstile...")
+    ts_found = False
+    for i in range(15):
         time.sleep(0.5)
-        if _ts_exists(sb):
+        if _ts_exists(sb, "密码页"):
+            ts_found = True
             break
-    if _ts_exists(sb):
+    if ts_found:
         print("🔍 密码页检测到 Turnstile，处理中...")
-        if not handle_turnstile(sb, LOGIN_URL):
+        if not handle_turnstile(sb, current_url="", no_refresh=True, max_retry=0):
             take_screenshot(sb, "password_ts_fail.png")
+            send_tg(f"❌ 密码页 Turnstile 验证失败\n时间: {now_str()}")
             return False
+        print("✅ 密码页 Turnstile 处理完成")
+    else:
+        print("  ℹ️ 密码页未检测到 Turnstile")
 
     # 第二步：输入密码，提交
     print("⌨️  输入密码...")
     sb.wait_for_element_visible(pw_selector, timeout=15)
     sb.type(pw_selector, ZAMPTO_PASSWORD)
+
+    # 点登录前最后再检测一次 Turnstile（有些站点在填完密码后才渲染）
+    print("🔍 阶段3：登录提交前最终检测 Turnstile...")
+    if _ts_exists(sb, "提交前"):
+        print("🔍 提交前检测到 Turnstile，先处理再点击登录...")
+        if not handle_turnstile(sb, current_url="", no_refresh=True, max_retry=0):
+            take_screenshot(sb, "login_pre_submit_ts_fail.png")
+            send_tg(f"❌ 登录提交前 Turnstile 验证失败\n时间: {now_str()}")
+            return False
+        print("✅ 提交前 Turnstile 处理完成")
+
     # 提交按钮多选择器兼容
     submit_ok = False
     for submit_sel in ['button[name="submit"]', 'button[type="submit"]', 'input[type="submit"]', 'button:contains("Sign in")', 'button:contains("Log in")', 'button:contains("登录")']:
@@ -950,10 +987,12 @@ def do_login(sb) -> bool:
         sb.type(pw_selector, "\n")
         print("   未找到提交按钮，使用回车提交")
 
+    # 阶段4：提交后等待跳转，期间持续检测 Turnstile
     print("⏳ 等待跳转登录成功...")
     logged_in_paths = ["/homepage", "/dashboard", "/home", "/console", "/servers", "/overview", "/main"]
     auth_paths = ["/auth/login", "/auth/signin", "/sign-in", "/login", "/register"]
-    for _ in range(60):
+    ts_handled_after_submit = False
+    for i in range(60):
         try:
             url = sb.get_current_url()
             lower_url = url.lower()
@@ -965,6 +1004,19 @@ def do_login(sb) -> bool:
             if DOMAIN in lower_url and not any(p in lower_url for p in auth_paths):
                 print(f"✅ 登录成功（已离开登录页）: {url}")
                 return True
+
+            # 若仍在登录页且检测到 Turnstile，处理它（不刷新，避免清空表单）
+            if not ts_handled_after_submit and any(p in lower_url for p in auth_paths):
+                if _ts_exists(sb, f"提交后第{i}s"):
+                    print(f"🔍 登录提交后检测到 Turnstile（第{i}s），处理中...")
+                    if handle_turnstile(sb, current_url="", no_refresh=True, max_retry=0):
+                        ts_handled_after_submit = True
+                        print("✅ 提交后 Turnstile 处理完成，继续等待跳转...")
+                    else:
+                        print("❌ 提交后 Turnstile 处理失败")
+                        take_screenshot(sb, "login_after_submit_ts_fail.png")
+                        send_tg(f"❌ 登录提交后 Turnstile 验证失败\n时间: {now_str()}")
+                        return False
         except Exception:
             pass
         time.sleep(0.5)
