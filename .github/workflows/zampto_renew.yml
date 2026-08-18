@@ -46,7 +46,7 @@ jobs:
 
       - name: 🐍 安装 Python 依赖
         run: |
-          pip install --cache-dir ~/.cache/pip -i https://pypi.tuna.tsinghua.edu.cn/simple seleniumbase
+          pip install --cache-dir ~/.cache/pip -i https://pypi.tuna.tsinghua.edu.cn/simple seleniumbase requests[socks]
           seleniumbase install chromedriver || true
 
       - name: 🛡️ 启动代理转发（支持 GOST / Hysteria2 节点链接）
@@ -65,20 +65,20 @@ jobs:
             wget -q "https://github.com/apernet/hysteria/releases/download/${VER}/hysteria-linux-amd64"
             chmod +x hysteria-linux-amd64
             # 解析 hy2 链接生成配置
-            python3 <<'PY'
-          import urllib.parse, json, os, re
+            cat > parse_hy2.py <<'PYEOF'
+          import urllib.parse, json, os
           url = os.environ['GOST_PROXY']
           if url.startswith('hy2://'):
               url = 'hysteria2://' + url[6:]
           parsed = urllib.parse.urlparse(url)
-          scheme, password, host_port = parsed.scheme, parsed.password, parsed.netloc
+          password, host_port = parsed.password, parsed.netloc
           if not host_port:
               host_port = parsed.path
           host, _, port = host_port.rpartition(':')
           port = int(port or 443)
           qs = urllib.parse.parse_qs(parsed.query)
           insecure = qs.get('insecure', ['0'])[0].lower() in ('1', 'true', 'yes')
-          sni = qs.get('sni', [host])[0]
+          sni = qs.get('sni', [host])[0] or host
           alpn = qs.get('alpn', ['h3'])[0]
           obfs = qs.get('obfs', [''])[0]
           obfs_password = qs.get('obfs-password', [''])[0]
@@ -99,9 +99,14 @@ jobs:
                   cfg["obfs"]["salamander"] = {"password": obfs_password}
           json.dump(cfg, open('hy2_config.json', 'w'), indent=2)
           print(json.dumps({k: (v if k != 'auth' else '***') for k, v in cfg.items()}, indent=2))
-          PY
+          PYEOF
+            python3 parse_hy2.py
+            echo "📝 hy2_config.json:"
+            cat hy2_config.json
             nohup ./hysteria-linux-amd64 client -c hy2_config.json > hy2.log 2>&1 &
-            sleep 4
+            sleep 5
+            echo "📝 hysteria 启动日志前 50 行:"
+            tail -n 50 hy2.log || true
             echo "✅ Hysteria2 客户端已启动于 $LOCAL_MIXED"
           else
             echo "🌐 使用 GOST 转发上游代理: $PROXY"
@@ -112,10 +117,12 @@ jobs:
             chmod +x gost
             nohup ./gost -L "mixed://:${LOCAL_PROXY_PORT}" -F "$PROXY" > gost.log 2>&1 &
             sleep 3
+            echo "📝 gost 启动日志:"
+            cat gost.log || true
             echo "✅ GOST 已启动于 $LOCAL_MIXED"
           fi
           echo "✅ 代理就绪，测试出口 IP..."
-          curl -s -x "$LOCAL_MIXED" https://api.ipify.org | sed 's/\([0-9]*\.[0-9]*\.\)[0-9]*\.[0-9]*/\1**.**/g' || echo "⚠️ 代理连通测试失败"
+          curl -s --connect-timeout 10 -x "$LOCAL_MIXED" https://api.ipify.org | sed 's/\([0-9]*\.[0-9]*\.\)[0-9]*\.[0-9]*/\1**.**/g' && echo "" || (echo "⚠️ 代理连通测试失败"; exit 1)
 
       - name: 🚀 运行续期脚本
         env:
@@ -131,10 +138,14 @@ jobs:
         run: |
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python zampto_renew.py
 
-      - name: 📸 上传调试截图
+      - name: 📸 上传调试截图和代理日志
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: debug-screenshots-${{ github.run_id }}
-          path: "*.png"
+          name: debug-${{ github.run_id }}
+          path: |
+            *.png
+            hy2.log
+            gost.log
+            hy2_config.json
           retention-days: 3
