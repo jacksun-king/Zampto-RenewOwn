@@ -792,17 +792,7 @@ def close_all_popups(sb):
 #   页面解析
 # ============================================================
 def get_time_left(sb) -> str:
-    """读取服务器详情页的剩余时间"""
-    try:
-        sb.wait_for_element_visible("#nextRenewalTime", timeout=8)
-        for _ in range(10):
-            t = sb.get_text("#nextRenewalTime").strip()
-            if t:
-                return t
-            time.sleep(0.5)
-        print("  ⚠️ #nextRenewalTime 已加载但内容为空")
-    except Exception as e:
-        print(f"  ⚠️ 读取 #nextRenewalTime 失败: {e}")
+    """读取服务器详情页的剩余时间（先 JS 正则快扫——实测详情页没有 #nextRenewalTime，别白等 8s）"""
     try:
         t = sb.execute_script("""
             (function() {
@@ -817,7 +807,17 @@ def get_time_left(sb) -> str:
         """)
         if t:
             return t
-    except:
+    except Exception:
+        pass
+    # 兜底：若未来页面重新出现该 id
+    try:
+        sb.wait_for_element_visible("#nextRenewalTime", timeout=3)
+        for _ in range(5):
+            t = sb.get_text("#nextRenewalTime").strip()
+            if t:
+                return t
+            time.sleep(0.5)
+    except Exception:
         pass
     return ""
 
@@ -1010,13 +1010,18 @@ def _handle_modal_turnstile(sb):
 #   单个服务器续期
 # ============================================================
 def _at_detail(sb, wait: float = 8.0) -> bool:
-    """轮询等待详情页特征元素（#nextRenewalTime / Renew Server 按钮），SPA 渲染需要几秒。"""
+    """轮询等待详情页特征（JS 文本判断，不受视口/渲染影响），SPA 渲染需要几秒。
+    特征：页面文本出现 'Renew Server' 按钮 / 'Basic Information' / 'Back to Servers'。
+    注意不要用 is_element_visible 查按钮——按钮在视口外时可见性判定会失败。"""
+    patterns = ["renew server", "basic information", "back to servers"]
     deadline = time.time() + wait
     while time.time() < deadline:
         try:
-            if sb.is_element_visible("#nextRenewalTime", timeout=0.5) or \
-               sb.is_element_visible('//*[contains(text(),"Renew Server")]', by="xpath", timeout=0.5):
-                return True
+            txt = sb.execute_script("return document.body.innerText || '';")
+            if txt:
+                low = txt.lower()
+                if any(p in low for p in patterns):
+                    return True
         except Exception:
             pass
         time.sleep(0.5)
@@ -1082,17 +1087,27 @@ def _goto_server_detail(sb, server_url: str, sid) -> str:
                 })();
             """)
             print(f"  🔎 View Server 元素: {info}")
+            # 优先点击 href 含当前 sid 的那一张卡片，避免多服务器时点错详情页
             sb.execute_script("""
                 (function(){
-                    var a = Array.from(document.querySelectorAll('a,button,span,div')).find(function(el){
+                    var sid = %s;
+                    var els = Array.from(document.querySelectorAll('a,button,span,div')).filter(function(el){
                         return (el.textContent||'').trim()==='View Server';
                     });
-                    if(!a) return false;
-                    var t = (a.tagName==='A') ? a : (a.closest('a') || a);
-                    t.click();
+                    if(!els.length) return false;
+                    var target = null;
+                    for (var i = 0; i < els.length; i++) {
+                        var el = els[i];
+                        var href = el.href || el.getAttribute('href') || '';
+                        var a = (el.tagName === 'A') ? el : (el.closest('a') || null);
+                        if (a) href = href || (a.href || '') + '|' + (a.getAttribute('href') || '');
+                        if (href.indexOf('id=' + sid) >= 0) { target = a || el; break; }
+                    }
+                    if (!target) target = els[0].closest('a') || els[0];
+                    target.click();
                     return true;
                 })();
-            """)
+            """ % str(sid))
             print("  🖱️ 已 JS 点击 View Server")
             time.sleep(6)
             if "login" in _cur().lower():
@@ -1261,8 +1276,14 @@ def renew_server(sb, server: dict) -> bool:
     close_result_modal(sb)
 
     print("🔄 刷新页面确认剩余时间...")
-    sb.uc_open_with_reconnect(server_url, reconnect_time=3)
+    # 注意：不用 uc_open_with_reconnect —— 一旦触发 challenge 会重连并丢 cookie（历史坑）。
+    # 直接 sb.get 只做导航，会话 cookie 保持不变。
+    try:
+        sb.get(server_url)
+    except Exception as e:
+        print(f"  ⚠️ sb.get 刷新异常: {e}")
     time.sleep(4)
+    _at_detail(sb, wait=10)
     new_time = get_time_left(sb)
     print(f"⏱️  续期后剩余时间: {new_time or '未读取到'}")
     take_screenshot(sb, f"{prefix}_final.png")
