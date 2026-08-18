@@ -20,17 +20,23 @@ jobs:
           python-version: '3.x'
 
       - name: 🛠️ 安装系统依赖（Ubuntu runner 已自带 Chrome）
+        timeout-minutes: 6
         run: |
           # runner 已预装 google-chrome-stable，不再重复安装，避免卡在 Google 源
-          # 换 Azure 镜像加速 apt，并设置超时避免卡死
+          # 先试 Azure 镜像（默认），卡死/超时自动切回官方源重试，避免 apt 卡住整个 job
+          install_deps() {
+            sudo apt-get update -qq && \
+            sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
+              xvfb x11-utils xdotool
+          }
           sudo bash -c 'source /etc/os-release && echo "deb http://azure.archive.ubuntu.com/ubuntu/ ${VERSION_CODENAME} main restricted universe multiverse" > /etc/apt/sources.list'
           sudo bash -c 'source /etc/os-release && echo "deb http://azure.archive.ubuntu.com/ubuntu/ ${VERSION_CODENAME}-updates main restricted universe multiverse" >> /etc/apt/sources.list'
           sudo bash -c 'source /etc/os-release && echo "deb http://azure.archive.ubuntu.com/ubuntu/ ${VERSION_CODENAME}-security main restricted universe multiverse" >> /etc/apt/sources.list'
-          sudo apt-get update -qq || true
-          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
-            xvfb \
-            x11-utils \
-            xdotool
+          if ! timeout 240 bash -c "$(declare -f install_deps); install_deps"; then
+            echo "⚠️ Azure 镜像源超时/失败，切回官方源重试..."
+            sudo bash -c 'source /etc/os-release && printf "deb http://archive.ubuntu.com/ubuntu/ ${VERSION_CODENAME} main restricted universe multiverse\ndeb http://archive.ubuntu.com/ubuntu/ ${VERSION_CODENAME}-updates main restricted universe multiverse\ndeb http://archive.ubuntu.com/ubuntu/ ${VERSION_CODENAME}-security main restricted universe multiverse\n" > /etc/apt/sources.list'
+            timeout 240 bash -c "$(declare -f install_deps); install_deps"
+          fi
 
       - name: ✅ 验证系统 Chrome
         run: |
