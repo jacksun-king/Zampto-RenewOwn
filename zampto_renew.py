@@ -1009,20 +1009,34 @@ def _handle_modal_turnstile(sb):
 # ============================================================
 #   单个服务器续期
 # ============================================================
+def _at_detail(sb, wait: float = 8.0) -> bool:
+    """轮询等待详情页特征元素（#nextRenewalTime / Renew Server 按钮），SPA 渲染需要几秒。"""
+    deadline = time.time() + wait
+    while time.time() < deadline:
+        try:
+            if sb.is_element_visible("#nextRenewalTime", timeout=0.5) or \
+               sb.is_element_visible('//*[contains(text(),"Renew Server")]', by="xpath", timeout=0.5):
+                return True
+        except Exception:
+            pass
+        time.sleep(0.5)
+    return False
+
+
 def _goto_server_detail(sb, server_url: str, sid) -> str:
-    """尽力进入服务器详情页，返回 'ok' / 'login' / 'list'。
-    多策略：sb.get → 停在列表页则 JS 点击 View Server → 自动切换新 tab。"""
+    """尽力进入服务器详情页，返回 'ok' / 'login' / 'list' / 'unknown'。
+    多策略：sb.get → 等 SPA 渲染 → 停在列表页则 JS 点击 View Server → 自动切换新 tab。"""
     print(f"🌐 访问: {server_url}  [{now_str()}]")
     nav_error = None
     try:
         sb.get(server_url)
-        time.sleep(4)
+        time.sleep(5)
     except Exception as e:
         nav_error = f"{type(e).__name__}"
         print(f"  ⚠️ sb.get 异常: {nav_error}")
         try:
             sb.open(server_url)
-            time.sleep(4)
+            time.sleep(5)
         except Exception as e2:
             nav_error = f"{type(e2).__name__}"
             print(f"  ⚠️ sb.open 异常: {nav_error}")
@@ -1033,83 +1047,79 @@ def _goto_server_detail(sb, server_url: str, sid) -> str:
         except Exception:
             return ""
     print(f"  📍 URL-1: {_cur()}")
-
-    def _at_detail():
-        try:
-            if sb.is_element_visible("#nextRenewalTime", timeout=0.5) or \
-               sb.is_element_visible('//*[contains(text(),"Renew Server")]', by="xpath", timeout=0.5):
-                return True
-        except Exception:
-            pass
-        return False
-
     if "login" in _cur().lower():
         return "login"
-    if _at_detail():
+
+    # 等 SPA 渲染详情内容（首轮 10s）
+    if _at_detail(sb, wait=10):
+        return "ok"
+    # 再补一轮（SPA 初始化较慢）
+    time.sleep(5)
+    if _at_detail(sb, wait=8):
         return "ok"
 
-    # 停在列表页：诊断 View Server 元素 + JS 原生点击 + 检查新 tab
+    # 不在详情页：看看是否列表页（有 View Server 则点击进入）
     try:
-        info = sb.execute_script("""
+        has_view = sb.execute_script("""
             (function(){
-                var out=[];
-                Array.from(document.querySelectorAll('a,button,span,div')).forEach(function(el){
-                    var t=(el.textContent||'').trim();
-                    if(t==='View Server'){
-                        out.push({tag:el.tagName, cls:(''+el.className).slice(0,60),
-                                  href:el.href||el.getAttribute('href')||'', target:el.target||''});
-                    }
-                });
-                return out.slice(0,10);
-            })();
-        """)
-        print(f"  🔎 View Server 元素: {info}")
-    except Exception as e:
-        print(f"  ⚠️ 读取 View Server 信息失败: {e}")
-
-    try:
-        ok = sb.execute_script("""
-            (function(){
-                var a = Array.from(document.querySelectorAll('a,button,span,div')).find(function(el){
+                return Array.from(document.querySelectorAll('a,button,span,div')).some(function(el){
                     return (el.textContent||'').trim()==='View Server';
                 });
-                if(!a) return false;
-                var t = (a.tagName==='A') ? a : (a.closest('a') || a);
-                t.click();
-                return true;
             })();
         """)
-        print(f"  🖱️ JS 点击 View Server: {ok}")
+        print(f"  🔎 页面含 View Server: {has_view}")
+        if has_view:
+            info = sb.execute_script("""
+                (function(){
+                    var out=[];
+                    Array.from(document.querySelectorAll('a,button,span,div')).forEach(function(el){
+                        var t=(el.textContent||'').trim();
+                        if(t==='View Server'){
+                            out.push({tag:el.tagName, href:el.href||el.getAttribute('href')||'', target:el.target||''});
+                        }
+                    });
+                    return out.slice(0,10);
+                })();
+            """)
+            print(f"  🔎 View Server 元素: {info}")
+            sb.execute_script("""
+                (function(){
+                    var a = Array.from(document.querySelectorAll('a,button,span,div')).find(function(el){
+                        return (el.textContent||'').trim()==='View Server';
+                    });
+                    if(!a) return false;
+                    var t = (a.tagName==='A') ? a : (a.closest('a') || a);
+                    t.click();
+                    return true;
+                })();
+            """)
+            print("  🖱️ 已 JS 点击 View Server")
+            time.sleep(6)
+            if "login" in _cur().lower():
+                return "login"
+            if _at_detail(sb, wait=8):
+                return "ok"
     except Exception as e:
-        print(f"  ⚠️ JS 点击 View Server 失败: {e}")
-    time.sleep(5)
+        print(f"  ⚠️ 列表页处理失败: {e}")
+        try:
+            print(f"  📍 URL: {_cur()}")
+        except Exception:
+            pass
+        return "list"
 
-    # 检查新 tab
+    # 无法识别：打印页面文本帮助诊断
     try:
-        handles = sb.driver.window_handles
-        if len(handles) > 1:
-            print(f"  📑 检测到 {len(handles)} 个 tab")
-            for h in handles:
-                sb.driver.switch_to.window(h)
-                time.sleep(1)
-                try:
-                    print(f"  📍 tab: {sb.driver.current_url}")
-                except Exception:
-                    pass
-        else:
-            print(f"  📍 URL-2: {_cur()}")
+        txt = sb.execute_script("return (document.body.innerText||'').slice(0,600);")
+        print(f"  📄 页面文本片段: {txt!r}")
+        frames = sb.execute_script("return Array.from(document.querySelectorAll('iframe')).map(f=>f.src).slice(0,5);")
+        print(f"  📑 iframes: {frames}")
     except Exception as e:
-        print(f"  ⚠️ tab 检查失败: {e}")
-
-    if "login" in _cur().lower():
-        return "login"
-    if _at_detail():
-        return "ok"
+        print(f"  ⚠️ 页面诊断失败: {e}")
     try:
         print(f"  📍 URL-3: {_cur()}")
     except Exception:
         pass
-    return "list"
+    return "unknown"
 
 
 def renew_server(sb, server: dict) -> bool:
@@ -1151,15 +1161,18 @@ def renew_server(sb, server: dict) -> bool:
             if not do_login(sb):
                 return False
             nav_state = _goto_server_detail(sb, server_url, sid)
+    if nav_state == "unknown":
+        print("  🔄 详情页状态未知，再尝试一轮...")
+        nav_state = _goto_server_detail(sb, server_url, sid)
     if nav_state == "login":
         print("  ❌ 反复被踢回登录页")
         take_screenshot(sb, f"{prefix}_still_login.png")
         send_tg(f"🖥 {name}\n❌ 访问详情页被持续踢回登录页\n时间: {now_str()}")
         return False
-    if nav_state == "list":
-        print("  ❌ 多策略导航后仍停留在服务器列表页，未能进入详情")
+    if nav_state in ("list", "unknown"):
+        print("  ❌ 多策略导航后仍未能进入详情页")
         take_screenshot(sb, f"{prefix}_list_stuck.png")
-        send_tg(f"🖥 {name}\n❌ 无法进入服务器详情页（停留在列表）\n时间: {now_str()}")
+        send_tg(f"🖥 {name}\n❌ 无法进入服务器详情页（{nav_state}）\n时间: {now_str()}")
         return False
     take_screenshot(sb, f"{prefix}_loaded.png")
 
