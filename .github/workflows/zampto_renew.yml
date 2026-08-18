@@ -49,22 +49,48 @@ jobs:
           pip install --cache-dir ~/.cache/pip -i https://pypi.tuna.tsinghua.edu.cn/simple seleniumbase
           seleniumbase install chromedriver || true
 
-      - name: 🛡️ 启动 GOST 代理转发
+      - name: 🛡️ 启动代理转发（支持 GOST / Hysteria2 节点链接）
         if: ${{ env.GOST_PROXY != '' }}
         env:
           GOST_PROXY: ${{ secrets.GOST_PROXY }}
+          LOCAL_PROXY_PORT: "1080"
         run: |
-          VERSION=$(curl -s https://api.github.com/repos/ginuerzh/gost/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | tr -d 'v')
-          echo "📦 GOST 版本: $VERSION"
-          wget -q "https://github.com/ginuerzh/gost/releases/download/v${VERSION}/gost_${VERSION}_linux_amd64.tar.gz"
-          tar -xzf "gost_${VERSION}_linux_amd64.tar.gz"
-          chmod +x gost
-          # 本地监听同时支持 http/socks（脚本用 http://127.0.0.1:8080）
-          # 上游 GOST_PROXY 自动按协议前缀识别：hysteria2:// / socks5:// / http:// 等
-          nohup ./gost -L mixed://:8080 -F "$GOST_PROXY" > gost.log 2>&1 &
-          sleep 3
-          echo "✅ GOST 已启动，测试连通性..."
-          curl -s -x http://127.0.0.1:8080 https://api.ipify.org | sed 's/\([0-9]*\.[0-9]*\.\)[0-9]*\.[0-9]*/\1**.**/g'
+          set -e
+          PROXY="$GOST_PROXY"
+          LOCAL_MIXED="socks5://127.0.0.1:${LOCAL_PROXY_PORT}"
+          if [[ "$PROXY" == hysteria2://* ]] || [[ "$PROXY" == hy2://* ]]; then
+            echo "🌐 检测到 Hysteria2 节点链接，使用 hysteria 客户端启动本地 SOCKS5"
+            VER=$(curl -s https://api.github.com/repos/apernet/hysteria/releases/latest | grep '"tag_name"' | head -1 | cut -d'"' -f4)
+            echo "📦 Hysteria 版本: $VER"
+            wget -q "https://github.com/apernet/hysteria/releases/download/${VER}/hysteria-linux-amd64"
+            chmod +x hysteria-linux-amd64
+            # 由节点链接直接生成客户端配置
+            ./hysteria-linux-amd64 client -c <(echo "{\"protocol\":\"udp\",\"server\":\"PLACEHOLDER\",\"socks5\":{\"listen\":\"127.0.0.1:${LOCAL_PROXY_PORT}\"}}") >/dev/null 2>&1 || true
+            # 用官方 convert 把节点链接转成标准配置
+            ./hysteria-linux-amd64 client convert "$PROXY" > hy2_config.json 2>/dev/null || true
+            # 确保监听地址为本地 socks5 端口
+            if [ -f hy2_config.json ]; then
+              python3 -c "import json,sys; c=json.load(open('hy2_config.json')); c.setdefault('socks5',{})['listen']='127.0.0.1:${LOCAL_PROXY_PORT}'; json.dump(c,open('hy2_config.json','w'),indent=2)"
+              nohup ./hysteria-linux-amd64 client -c hy2_config.json > hy2.log 2>&1 &
+              sleep 4
+              echo "✅ Hysteria2 客户端已启动于 $LOCAL_MIXED"
+            else
+              echo "❌ 无法转换 Hysteria2 节点链接"
+              exit 1
+            fi
+          else
+            echo "🌐 使用 GOST 转发上游代理: $PROXY"
+            VERSION=$(curl -s https://api.github.com/repos/ginuerzh/gost/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | tr -d 'v')
+            echo "📦 GOST 版本: $VERSION"
+            wget -q "https://github.com/ginuerzh/gost/releases/download/v${VERSION}/gost_${VERSION}_linux_amd64.tar.gz"
+            tar -xzf "gost_${VERSION}_linux_amd64.tar.gz"
+            chmod +x gost
+            nohup ./gost -L "mixed://:${LOCAL_PROXY_PORT}" -F "$PROXY" > gost.log 2>&1 &
+            sleep 3
+            echo "✅ GOST 已启动于 $LOCAL_MIXED"
+          fi
+          echo "✅ 代理就绪，测试出口 IP..."
+          curl -s -x "$LOCAL_MIXED" https://api.ipify.org | sed 's/\([0-9]*\.[0-9]*\.\)[0-9]*\.[0-9]*/\1**.**/g' || echo "⚠️ 代理连通测试失败"
 
       - name: 🚀 运行续期脚本
         env:
