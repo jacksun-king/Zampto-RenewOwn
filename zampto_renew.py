@@ -45,8 +45,6 @@ if ZAMPTO_APP_ID and LOGIN_URL == "https://dash.zampto.net/auth/login":
 
 DOMAIN = os.environ.get("ZAMPTO_DOMAIN", "") or "dash.zampto.net"
 
-DOMAIN = os.environ.get("ZAMPTO_DOMAIN", "") or "dash.zampto.net"
-
 # TARGET_SERVERS: JSON 字符串，例如 '[{"id":"4480","name":"java"},{"id":"4481","name":"python"}]'
 #   也可用 TARGET_IDS / TARGET_NAMES 逗号分隔形式
 _raw_servers = os.environ.get("TARGET_SERVERS", "")
