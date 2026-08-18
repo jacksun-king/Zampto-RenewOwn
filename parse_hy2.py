@@ -66,7 +66,9 @@ def parse_hy2_url(url: str) -> dict:
             "maxStreamReceiveWindow": 8388608,
             "initConnReceiveWindow": 20971520,
             "maxConnReceiveWindow": 20971520,
+            "disablePathMTUDiscovery": True,
         },
+        "bandwidth": {"up": "10 mbps", "down": "50 mbps"},
         "socks5": {"listen": f"127.0.0.1:{os.environ.get('LOCAL_PROXY_PORT', '1080')}"},
     }
     if alpn:
