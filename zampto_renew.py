@@ -587,13 +587,17 @@ def handle_turnstile(sb, current_url: str = "", no_refresh: bool = False,
             try:
                 if on_retry():
                     print(f"    ✅ 弹框已重新触发（第{retry_count}次）")
-                    # 等待弹框重新加载
+                    # 等待弹框重新加载：最多 3 分钟，期间一旦检测到 Turnstile 或通过就提前结束
                     waited = 0
-                    for _ in range(15):
-                        if _ts_exists(sb):
+                    print(f"    ⏳ 等待弹框 Turnstile 加载（最多 180s，检测到即停止）...")
+                    for _ in range(180):
+                        if _ts_exists(sb, label=f"重触发第{retry_count}次") or _ts_solved(sb):
                             break
                         time.sleep(1.0)
                         waited += 1
+                        # 每 30s 打印一次进度
+                        if waited % 30 == 0:
+                            print(f"      ...已等 {waited}s，Turnstile 尚未加载")
                     print(f"    ⏳ 等待弹框 Turnstile 加载完成（{waited}s）")
                     time.sleep(2)
                 else:
@@ -734,7 +738,7 @@ def _check_renew_result(sb):
                     }
                 }
                 if (/cooldown|too soon|wait|please wait|try again later/i.test(allText)) return 'cooldown';
-                if (/success|renewed|completed|confirmed|server renewed/i.test(allText)) return 'success';
+                if (/server has been renewed successfully|success|renewed|completed|confirmed|server renewed/i.test(allText)) return 'success';
                 var btns = document.querySelectorAll('button');
                 for (var i = 0; i < btns.length; i++) {
                     var txt = btns[i].innerText.trim();
@@ -811,10 +815,12 @@ def renew_server(sb, server: dict) -> bool:
     take_screenshot(sb, f"{prefix}_after_click.png")
 
     # ④ 等待弹框内的 Turnstile 加载（不能刷新页面，否则弹框会消失）
-    print(f"⏳ 等待 Turnstile 加载（最多 60s，不刷新页面）... [{now_str()}]")
+    #    检测到 Loading security verification 即开始等，至少等 3 分钟（180s）让 Turnstile 出现；
+    #    若 3 分钟内仍未出现，视为失败，交由下方 max_retry 重新触发续期按钮。
+    print(f"⏳ 等待 Turnstile 加载（检测到 Loading 后至少等 180s，不刷新页面）... [{now_str()}]")
     ts_found = False
     pre_result = None
-    for _ in range(60):
+    for _ in range(180):
         if _ts_exists(sb, label="弹框等待", detect_loading=True):
             print(f"✅ Turnstile 已加载/加载中（第 {_+1}s）")
             ts_found = True
@@ -834,22 +840,27 @@ def renew_server(sb, server: dict) -> bool:
             time_left = get_time_left(sb)
             send_tg(f"🖥 {name}\n✅ 续期成功\n⏱️ 剩余: {time_left}\n时间: {now_str()}")
             return True
-        print("❌ Turnstile 未出现")
+        print(f"❌ 3 分钟内 Turnstile 未出现，将通过重触发续期按钮重试")
         take_screenshot(sb, f"{prefix}_no_turnstile.png")
-        send_tg(f"🖥 {name}\n❌ Turnstile 未出现\n时间: {now_str()}")
-        return False
 
     # ⑤ 处理 Turnstile（弹框模式：不刷新页面，失败时重新点击 Renew Server 触发弹框）
     def retry_renew_modal():
         print("    重新查找并点击 Renew Server... [重触发弹框]")
+        # 重触发前先等久一点，避免 Turnstile 还没加载完就反复点按钮
+        print(f"    ⏳ 重触发前等待 20s，让弹框充分加载... [{now_str()}]")
+        time.sleep(20)
         try:
             sb.execute_script("""
                 (function(){
-                    // 先尝试关闭已打开的弹框
                     var boxes = document.querySelectorAll('div[role="dialog"], div[role="alertdialog"], .modal, [class*="modal"], [class*="dialog"], [class*="Dialog"]');
                     for (var i = 0; i < boxes.length; i++) {
                         var close = boxes[i].querySelector('button, svg, [class*="close"], [aria-label*="close" i]');
-                        if (close) close.click();
+                        if (close) {
+                            if (typeof close.click === 'function') close.click();
+                            else if (close.dispatchEvent) {
+                                close.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+                            }
+                        }
                     }
                 })();
             """)
@@ -869,21 +880,26 @@ def renew_server(sb, server: dict) -> bool:
         send_tg(f"🖥 {name}\n❌ Turnstile 验证失败（未重跑工作流，已自动停止重试以保护节点）\n时间: {now_str()}")
         return False
 
-    # ⑥ 等待提交结果（弹框内）
-    print(f"⏳ 等待续期结果... [{now_str()}]")
+    # ⑥ 等待提交结果（弹框内）：处理完 Turnstile 后，等待 "Server has been renewed successfully"
+    print(f"⏳ 等待续期结果（最多 40s）... [{now_str()}]")
     start = time.time()
     final_status = "unknown"
     while time.time() - start < 40:
         r = _check_renew_result(sb)
         if r == "success":
-            print("🎉 检测到成功结果！")
+            print(f"🎉 检测到续期成功文案（耗时 {time.time()-start:.1f}s）")
             final_status = "success"
             break
         if r == "cooldown":
-            print("⏳ 冷却期内")
+            print(f"⏳ 冷却期内（耗时 {time.time()-start:.1f}s）")
             final_status = "cooldown"
             break
+        elapsed = int(time.time() - start)
+        if elapsed > 0 and elapsed % 10 == 0:
+            print(f"    ...已等 {elapsed}s，尚未检测到结果")
         time.sleep(1)
+    if final_status == "unknown":
+        print(f"⚠️ 40s 内未检测到明确结果，继续后续确认流程")
 
     time.sleep(2)
     take_screenshot(sb, f"{prefix}_result.png")
