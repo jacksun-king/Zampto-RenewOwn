@@ -43,9 +43,16 @@ jobs:
           google-chrome --version
           which google-chrome
 
+      - name: 💾 缓存 pip 包
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-seleniumbase-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: pip-${{ runner.os }}-seleniumbase-
+
       - name: 🐍 安装 Python 依赖
         run: |
-          pip install -i https://pypi.tuna.tsinghua.edu.cn/simple seleniumbase
+          pip install --cache-dir ~/.cache/pip -i https://pypi.tuna.tsinghua.edu.cn/simple seleniumbase
           seleniumbase install chromedriver || true
 
       - name: 🛡️ 启动 GOST 代理转发
@@ -58,7 +65,9 @@ jobs:
           wget -q "https://github.com/ginuerzh/gost/releases/download/v${VERSION}/gost_${VERSION}_linux_amd64.tar.gz"
           tar -xzf "gost_${VERSION}_linux_amd64.tar.gz"
           chmod +x gost
-          nohup ./gost -L http://:8080 -F "$GOST_PROXY" > gost.log 2>&1 &
+          # 本地监听同时支持 http/socks（脚本用 http://127.0.0.1:8080）
+          # 上游 GOST_PROXY 自动按协议前缀识别：hysteria2:// / socks5:// / http:// 等
+          nohup ./gost -L mixed://:8080 -F "$GOST_PROXY" > gost.log 2>&1 &
           sleep 3
           echo "✅ GOST 已启动，测试连通性..."
           curl -s -x http://127.0.0.1:8080 https://api.ipify.org | sed 's/\([0-9]*\.[0-9]*\.\)[0-9]*\.[0-9]*/\1**.**/g'
