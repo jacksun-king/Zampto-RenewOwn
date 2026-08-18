@@ -32,19 +32,17 @@ else:
 GOST_PROXY = os.environ.get("GOST_PROXY", "")
 LOCAL_PROXY = "http://127.0.0.1:8080" if GOST_PROXY else ""
 
-# ZAMPTO_APP_ID: 登录 URL 上的 app_id 参数（wode808 验证需要带此参数才能正常过 Cloudflare）
-#   留空则使用不带 app_id 的登录页。默认取 wode808 实测可用的 app_id。
-ZAMPTO_APP_ID = os.environ.get("ZAMPTO_APP_ID", "") or "bmhk6c8qdqxphlyscztgl"
+# LOGIN_URL: Zampto 登录页地址；未设置或为空时使用默认地址
+#   根据当前面板，默认登录页为 /auth/login
+LOGIN_URL = os.environ.get("LOGIN_URL", "") or "https://dash.zampto.net/auth/login"
 
-# LOGIN_URL: Zampto 登录页地址；未设置或为空时按 DOMAIN + APP_ID 自动拼装
-_login_raw = os.environ.get("LOGIN_URL", "")
-if _login_raw:
-    LOGIN_URL = _login_raw
-else:
-    if ZAMPTO_APP_ID:
-        LOGIN_URL = f"https://dash.zampto.net/sign-in?app_id={ZAMPTO_APP_ID}"
-    else:
-        LOGIN_URL = "https://dash.zampto.net/sign-in"
+# ZAMPTO_APP_ID: 可选，登录 URL 上的 app_id 参数；如果设置且 LOGIN_URL 未手动指定，
+#   会在默认地址后追加 ?app_id=...。当前 dash.zampto.net 用不到，保持兼容。
+ZAMPTO_APP_ID = os.environ.get("ZAMPTO_APP_ID", "")
+if ZAMPTO_APP_ID and LOGIN_URL == "https://dash.zampto.net/auth/login":
+    LOGIN_URL = f"{LOGIN_URL}?app_id={ZAMPTO_APP_ID}"
+
+DOMAIN = os.environ.get("ZAMPTO_DOMAIN", "") or "dash.zampto.net"
 
 DOMAIN = os.environ.get("ZAMPTO_DOMAIN", "") or "dash.zampto.net"
 
