@@ -85,7 +85,8 @@ def send_tg(msg: str):
         return
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     try:
-        r = requests.post(url, timeout=15, proxies=_proxies(),
+        # TG 通知必须直连（不走 SOCKS 代理，代理不稳定会导致通知丢失）
+        r = requests.post(url, timeout=15,
                           json={"chat_id": TG_ID, "text": msg, "parse_mode": "HTML"})
         if r.status_code == 200 and r.json().get("ok"):
             print("✅ Telegram 消息已发送")
@@ -1008,6 +1009,109 @@ def _handle_modal_turnstile(sb):
 # ============================================================
 #   单个服务器续期
 # ============================================================
+def _goto_server_detail(sb, server_url: str, sid) -> str:
+    """尽力进入服务器详情页，返回 'ok' / 'login' / 'list'。
+    多策略：sb.get → 停在列表页则 JS 点击 View Server → 自动切换新 tab。"""
+    print(f"🌐 访问: {server_url}  [{now_str()}]")
+    nav_error = None
+    try:
+        sb.get(server_url)
+        time.sleep(4)
+    except Exception as e:
+        nav_error = f"{type(e).__name__}"
+        print(f"  ⚠️ sb.get 异常: {nav_error}")
+        try:
+            sb.open(server_url)
+            time.sleep(4)
+        except Exception as e2:
+            nav_error = f"{type(e2).__name__}"
+            print(f"  ⚠️ sb.open 异常: {nav_error}")
+
+    def _cur():
+        try:
+            return sb.get_current_url()
+        except Exception:
+            return ""
+    print(f"  📍 URL-1: {_cur()}")
+
+    def _at_detail():
+        try:
+            if sb.is_element_visible("#nextRenewalTime", timeout=0.5) or \
+               sb.is_element_visible('//*[contains(text(),"Renew Server")]', by="xpath", timeout=0.5):
+                return True
+        except Exception:
+            pass
+        return False
+
+    if "login" in _cur().lower():
+        return "login"
+    if _at_detail():
+        return "ok"
+
+    # 停在列表页：诊断 View Server 元素 + JS 原生点击 + 检查新 tab
+    try:
+        info = sb.execute_script("""
+            (function(){
+                var out=[];
+                Array.from(document.querySelectorAll('a,button,span,div')).forEach(function(el){
+                    var t=(el.textContent||'').trim();
+                    if(t==='View Server'){
+                        out.push({tag:el.tagName, cls:(''+el.className).slice(0,60),
+                                  href:el.href||el.getAttribute('href')||'', target:el.target||''});
+                    }
+                });
+                return out.slice(0,10);
+            })();
+        """)
+        print(f"  🔎 View Server 元素: {info}")
+    except Exception as e:
+        print(f"  ⚠️ 读取 View Server 信息失败: {e}")
+
+    try:
+        ok = sb.execute_script("""
+            (function(){
+                var a = Array.from(document.querySelectorAll('a,button,span,div')).find(function(el){
+                    return (el.textContent||'').trim()==='View Server';
+                });
+                if(!a) return false;
+                var t = (a.tagName==='A') ? a : (a.closest('a') || a);
+                t.click();
+                return true;
+            })();
+        """)
+        print(f"  🖱️ JS 点击 View Server: {ok}")
+    except Exception as e:
+        print(f"  ⚠️ JS 点击 View Server 失败: {e}")
+    time.sleep(5)
+
+    # 检查新 tab
+    try:
+        handles = sb.driver.window_handles
+        if len(handles) > 1:
+            print(f"  📑 检测到 {len(handles)} 个 tab")
+            for h in handles:
+                sb.driver.switch_to.window(h)
+                time.sleep(1)
+                try:
+                    print(f"  📍 tab: {sb.driver.current_url}")
+                except Exception:
+                    pass
+        else:
+            print(f"  📍 URL-2: {_cur()}")
+    except Exception as e:
+        print(f"  ⚠️ tab 检查失败: {e}")
+
+    if "login" in _cur().lower():
+        return "login"
+    if _at_detail():
+        return "ok"
+    try:
+        print(f"  📍 URL-3: {_cur()}")
+    except Exception:
+        pass
+    return "list"
+
+
 def renew_server(sb, server: dict) -> bool:
     sid = server["id"]
     name = server["name"]
@@ -1018,91 +1122,44 @@ def renew_server(sb, server: dict) -> bool:
     print(f"🖥️  续期: {name}  (id={sid})")
     print("-" * 40)
 
-    # ① 直接打开服务器详情页
-    #    注意：不用 uc_open_with_reconnect（遇 CF 挑战会重连丢 cookie 被踢回登录页），
-    #    用原生 driver.get 保持同一上下文；若仍被重定向登录页则恢复 cookie 重试，最后再重新登录。
-    print(f"🌐 访问: {server_url}  [{now_str()}]")
+    # ① 进入服务器详情页（多策略，见 _goto_server_detail）
     saved_cookies = None
     try:
         saved_cookies = sb.driver.get_cookies()
     except Exception:
         pass
-
-    def _goto(url, tries=3):
-        """原生导航 + 重试 + JS 兜底（driver.get 偶发 Connection refused，SPA 也可能忽略 query）"""
-        for i in range(tries):
-            try:
-                sb.driver.get(url)
-                return True
-            except Exception as e:
-                print(f"  ⚠️ driver.get 第{i+1}次异常: {type(e).__name__}")
-                time.sleep(2)
-        try:
-            sb.driver.execute_script("window.location.href = arguments[0];", url)
-            return True
-        except Exception as e:
-            print(f"  ⚠️ JS 导航异常: {e}")
-            return False
-
-    _goto(server_url)
-    time.sleep(5)
-    try:
-        print(f"  📍 当前 URL: {sb.get_current_url()}")
-    except Exception as e:
-        print(f"  ⚠️ 读取 URL 失败: {e}")
-
-    # 若 SPA 把 ?id= 当列表页路由（页面停留服务器列表），点 View Server 进入详情
-    try:
-        if sb.is_element_present('//*[contains(text(),"View Server")]', by="xpath"):
-            print("  🔎 当前为服务器列表页，点击 View Server 进入详情...")
-            sb.click('//*[contains(text(),"View Server")]', by="xpath")
-            time.sleep(5)
-            try:
-                print(f"  📍 详情页 URL: {sb.get_current_url()}")
-            except Exception:
-                pass
-    except Exception as e:
-        print(f"  ⚠️ 点击 View Server 失败: {e}")
-
-    for attempt in range(3):
-        try:
-            cur = sb.get_current_url()
-        except Exception:
-            cur = ""
-        if "login" not in cur.lower():
-            break
-        print(f"  ⚠️ 第 {attempt+1} 次被重定向到登录页: {cur}")
-        if saved_cookies:
-            try:
-                for c in saved_cookies:
-                    try:
-                        sb.driver.add_cookie(c)
-                    except Exception:
-                        pass
-                print("  🔄 已恢复会话 cookie，重新加载详情页...")
-                sb.driver.get(server_url)
-                time.sleep(4)
-                continue
-            except Exception as e:
-                print(f"  ⚠️ 恢复 cookie 失败: {e}")
-        print("  🔄 会话已失效，重新登录...")
-        if not do_login(sb):
-            return False
-        if saved_cookies:
-            try:
-                for c in saved_cookies:
-                    try:
-                        sb.driver.add_cookie(c)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-        sb.driver.get(server_url)
-        time.sleep(4)
-    else:
-        print("  ❌ 多次尝试后仍停留在登录页")
+    nav_state = _goto_server_detail(sb, server_url, sid)
+    if nav_state == "login":
+        # 会话失效：恢复 cookie 重试一次，仍失败则重新登录
+        for attempt in range(2):
+            print(f"  ⚠️ 第 {attempt+1} 次被重定向到登录页，恢复 cookie 重试...")
+            if saved_cookies:
+                try:
+                    for c in saved_cookies:
+                        try:
+                            sb.driver.add_cookie(c)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            time.sleep(2)
+            nav_state = _goto_server_detail(sb, server_url, sid)
+            if nav_state != "login":
+                break
+        if nav_state == "login":
+            print("  🔄 会话已失效，重新登录...")
+            if not do_login(sb):
+                return False
+            nav_state = _goto_server_detail(sb, server_url, sid)
+    if nav_state == "login":
+        print("  ❌ 反复被踢回登录页")
         take_screenshot(sb, f"{prefix}_still_login.png")
         send_tg(f"🖥 {name}\n❌ 访问详情页被持续踢回登录页\n时间: {now_str()}")
+        return False
+    if nav_state == "list":
+        print("  ❌ 多策略导航后仍停留在服务器列表页，未能进入详情")
+        take_screenshot(sb, f"{prefix}_list_stuck.png")
+        send_tg(f"🖥 {name}\n❌ 无法进入服务器详情页（停留在列表）\n时间: {now_str()}")
         return False
     take_screenshot(sb, f"{prefix}_loaded.png")
 
