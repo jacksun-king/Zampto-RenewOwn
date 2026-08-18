@@ -1027,11 +1027,42 @@ def renew_server(sb, server: dict) -> bool:
         saved_cookies = sb.driver.get_cookies()
     except Exception:
         pass
+
+    def _goto(url, tries=3):
+        """原生导航 + 重试 + JS 兜底（driver.get 偶发 Connection refused，SPA 也可能忽略 query）"""
+        for i in range(tries):
+            try:
+                sb.driver.get(url)
+                return True
+            except Exception as e:
+                print(f"  ⚠️ driver.get 第{i+1}次异常: {type(e).__name__}")
+                time.sleep(2)
+        try:
+            sb.driver.execute_script("window.location.href = arguments[0];", url)
+            return True
+        except Exception as e:
+            print(f"  ⚠️ JS 导航异常: {e}")
+            return False
+
+    _goto(server_url)
+    time.sleep(5)
     try:
-        sb.driver.get(server_url)
+        print(f"  📍 当前 URL: {sb.get_current_url()}")
     except Exception as e:
-        print(f"  ⚠️ 打开详情页异常: {e}")
-    time.sleep(4)
+        print(f"  ⚠️ 读取 URL 失败: {e}")
+
+    # 若 SPA 把 ?id= 当列表页路由（页面停留服务器列表），点 View Server 进入详情
+    try:
+        if sb.is_element_present('//*[contains(text(),"View Server")]', by="xpath"):
+            print("  🔎 当前为服务器列表页，点击 View Server 进入详情...")
+            sb.click('//*[contains(text(),"View Server")]', by="xpath")
+            time.sleep(5)
+            try:
+                print(f"  📍 详情页 URL: {sb.get_current_url()}")
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"  ⚠️ 点击 View Server 失败: {e}")
 
     for attempt in range(3):
         try:
