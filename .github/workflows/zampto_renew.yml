@@ -1,83 +1,551 @@
-name: Zampto-Renew
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: '0 1 * * *'   # UTC 01:00 = 北京时间 09:00
+import time
+import os
+import json
+import requests
+import subprocess
+from datetime import datetime
+from seleniumbase import SB
 
-jobs:
-  run_zampto_renew:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+# ============================================================
+#   ⚙️ 配置（全部从环境变量读取，适配 akimify/Zampto-Renew 的 GitHub Actions 工作流）
+# ============================================================
+# ZAMPTO_ACCOUNT: 你的 Zampto 登录邮箱
+ZAMPTO_ACCOUNT = os.environ.get("ZAMPTO_ACCOUNT", "")
 
-    steps:
-      - name: 📂 检出仓库（脚本已在根目录）
-        uses: actions/checkout@v4
+# ZAMPTO_PASSWORD: 你的 Zampto 登录密码（工作流未明确该变量名，这里兼容两种命名）
+ZAMPTO_PASSWORD = os.environ.get("ZAMPTO_PASSWORD", "") or os.environ.get("PASSWORD", "")
 
-      - name: 🐍 设置 Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
+# TG_BOT: Telegram 通知，支持两种格式
+#   1) "token:chatid"        （与工作流 secrets.TG_BOT 对应）
+#   2) 分别设置 TG_TOKEN / TG_ID
+_TG_BOT = os.environ.get("TG_BOT", "")
+if _TG_BOT and ":" in _TG_BOT:
+    TG_TOKEN, TG_ID = _TG_BOT.split(":", 1)
+else:
+    TG_TOKEN = os.environ.get("TG_TOKEN", "")
+    TG_ID = os.environ.get("TG_ID", "")
 
-      - name: 💾 缓存 apt 包
-        uses: actions/cache@v4
-        with:
-          path: |
-            /var/cache/apt/archives
-            /var/lib/apt/lists
-          key: apt-${{ runner.os }}-${{ github.run_id }}
-          restore-keys: apt-${{ runner.os }}-
+# GOST_PROXY: 工作流启动 GOST 后本地 8080 代理地址；为空则不使用代理
+GOST_PROXY = os.environ.get("GOST_PROXY", "")
+LOCAL_PROXY = "http://127.0.0.1:8080" if GOST_PROXY else ""
 
-      - name: 🛠️ 安装系统依赖（Ubuntu runner 已自带 Chrome）
-        run: |
-          # runner 已预装 google-chrome-stable，不再重复安装，避免卡在 Google 源
-          sudo apt-get update -qq || true
-          sudo apt-get install -y --no-install-recommends \
-            xvfb \
-            x11-utils \
-            xdotool \
-            scrot
+LOGIN_URL = "https://auth.zampto.net/sign-in?app_id=bmhk6c8qdqxphlyscztgl"
+DOMAIN = "dash.zampto.net"
 
-      - name: ✅ 验证系统 Chrome
-        run: |
-          google-chrome --version
-          which google-chrome
+# TARGET_SERVERS: JSON 字符串，例如 '[{"id":"4480","name":"java"},{"id":"4481","name":"python"}]'
+#   也可用 TARGET_IDS / TARGET_NAMES 逗号分隔形式
+_raw_servers = os.environ.get("TARGET_SERVERS", "")
+if _raw_servers:
+    try:
+        TARGET_SERVERS = json.loads(_raw_servers)
+    except Exception:
+        TARGET_SERVERS = []
+else:
+    _ids = os.environ.get("TARGET_IDS", "").split(",")
+    _names = os.environ.get("TARGET_NAMES", "").split(",")
+    TARGET_SERVERS = []
+    for i, sid in enumerate([x.strip() for x in _ids if x.strip()]):
+        name = _names[i].strip() if i < len(_names) else sid
+        TARGET_SERVERS.append({"id": sid, "name": name})
 
-      - name: 🐍 安装 Python 依赖
-        run: |
-          pip install -i https://pypi.tuna.tsinghua.edu.cn/simple seleniumbase
-          seleniumbase install chromedriver || true
+if not ZAMPTO_ACCOUNT or not ZAMPTO_PASSWORD:
+    raise SystemExit("❌ 缺少必填环境变量 ZAMPTO_ACCOUNT / ZAMPTO_PASSWORD")
 
-      - name: 🛡️ 启动 GOST 代理转发
-        if: ${{ env.GOST_PROXY != '' }}
-        env:
-          GOST_PROXY: ${{ secrets.GOST_PROXY }}
-        run: |
-          VERSION=$(curl -s https://api.github.com/repos/ginuerzh/gost/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | tr -d 'v')
-          echo "📦 GOST 版本: $VERSION"
-          wget -q "https://github.com/ginuerzh/gost/releases/download/v${VERSION}/gost_${VERSION}_linux_amd64.tar.gz"
-          tar -xzf "gost_${VERSION}_linux_amd64.tar.gz"
-          chmod +x gost
-          nohup ./gost -L http://:8080 -F "$GOST_PROXY" > gost.log 2>&1 &
-          sleep 3
-          echo "✅ GOST 已启动，测试连通性..."
-          curl -s -x http://127.0.0.1:8080 https://api.ipify.org | sed 's/\([0-9]*\.[0-9]*\.\)[0-9]*\.[0-9]*/\1**.**/g'
+if not TARGET_SERVERS:
+    raise SystemExit("❌ 缺少服务器列表，请设置 TARGET_SERVERS 或 TARGET_IDS")
 
-      - name: 🚀 运行续期脚本
-        env:
-          PYTHONIOENCODING: utf-8
-          ZAMPTO_ACCOUNT: ${{ secrets.ZAMPTO_ACCOUNT }}
-          ZAMPTO_PASSWORD: ${{ secrets.ZAMPTO_PASSWORD }}
-          TARGET_SERVERS: ${{ secrets.TARGET_SERVERS }}
-          GOST_PROXY: ${{ secrets.GOST_PROXY }}
-          TG_BOT: ${{ secrets.TG_BOT }}
-        run: |
-          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python zampto_renew.py
 
-      - name: 📸 上传调试截图
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-screenshots-${{ github.run_id }}
-          path: "*.png"
-          retention-days: 3
+# ============================================================
+#   工具函数
+# ============================================================
+def now_str():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _proxies():
+    if LOCAL_PROXY:
+        return {"http": LOCAL_PROXY, "https": LOCAL_PROXY}
+    return {}
+
+
+def send_tg(msg: str):
+    if not TG_TOKEN or not TG_ID:
+        return
+    url = (f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+           f"?chat_id={TG_ID}&text={requests.utils.quote(msg)}")
+    try:
+        requests.get(url, timeout=10, proxies=_proxies())
+        print("✅ Telegram 消息已发送")
+    except Exception as e:
+        print(f"⚠️ TG 通知失败: {e}")
+
+
+def take_screenshot(sb, filename: str):
+    sb.save_screenshot(filename)
+    print(f"📸 截图 → {filename}")
+
+
+# ============================================================
+#   Turnstile（完全照搬 weirdhost 逻辑）
+# ============================================================
+_EXPAND_JS = """
+(function() {
+    var ts = document.querySelector('input[name="cf-turnstile-response"]');
+    if (!ts) return 'no-turnstile';
+    var el = ts;
+    for (var i = 0; i < 20; i++) {
+        el = el.parentElement;
+        if (!el) break;
+        var s = window.getComputedStyle(el);
+        if (s.overflow === 'hidden' || s.overflowX === 'hidden' || s.overflowY === 'hidden')
+            el.style.overflow = 'visible';
+        el.style.minWidth = 'max-content';
+    }
+    document.querySelectorAll('iframe').forEach(function(f){
+        if (f.src && f.src.includes('challenges.cloudflare.com')) {
+            f.style.width = '300px'; f.style.height = '65px';
+            f.style.minWidth = '300px';
+            f.style.visibility = 'visible'; f.style.opacity = '1';
+        }
+    });
+    return 'done';
+})();
+"""
+
+
+def _ts_exists(sb):
+    try:
+        return bool(sb.execute_script(
+            "return (function(){ return document.querySelector('input[name=\"cf-turnstile-response\"]') !== null; })();"))
+    except:
+        return False
+
+
+def _ts_solved(sb):
+    try:
+        return bool(sb.execute_script(
+            "return (function(){ var i=document.querySelector('input[name=\"cf-turnstile-response\"]');"
+            "return !!(i && i.value && i.value.length > 20); })();"))
+    except:
+        return False
+
+
+def _activate_win():
+    try:
+        r = subprocess.run(["xdotool", "search", "--onlyvisible", "--class", "chrome"],
+                           capture_output=True, text=True, timeout=3)
+        wids = r.stdout.strip().split("\n")
+        if wids and wids[0]:
+            subprocess.run(["xdotool", "windowactivate", wids[0]],
+                           timeout=2, stderr=subprocess.DEVNULL)
+            time.sleep(0.2)
+    except:
+        pass
+
+
+def _xclick(x, y):
+    _activate_win()
+    try:
+        subprocess.run(["xdotool", "mousemove", str(x), str(y)], timeout=2, stderr=subprocess.DEVNULL)
+        time.sleep(0.15)
+        subprocess.run(["xdotool", "click", "1"], timeout=2, stderr=subprocess.DEVNULL)
+    except:
+        os.system(f"xdotool mousemove {x} {y} click 1 2>/dev/null")
+
+
+def _click_turnstile(sb):
+    coords = sb.execute_script("""
+        (function() {
+            var iframes = document.querySelectorAll('iframe');
+            for (var i = 0; i < iframes.length; i++) {
+                var src = iframes[i].src || '';
+                if (src.includes('cloudflare') || src.includes('turnstile')) {
+                    var r = iframes[i].getBoundingClientRect();
+                    if (r.width > 0 && r.height > 0)
+                        return {cx: Math.round(r.x+30), cy: Math.round(r.y+r.height/2)};
+                }
+            }
+            var inp = document.querySelector('input[name="cf-turnstile-response"]');
+            if (inp) {
+                var p = inp.parentElement;
+                for (var j = 0; j < 10; j++) {
+                    if (!p) break;
+                    var r = p.getBoundingClientRect();
+                    if (r.width > 100 && r.height > 30)
+                        return {cx: Math.round(r.x+30), cy: Math.round(r.y+r.height/2)};
+                    p = p.parentElement;
+                }
+            }
+            return null;
+        })();
+    """)
+    if not coords:
+        print("  ⚠️ 无法定位 Turnstile 坐标")
+        return
+    wi = sb.execute_script(
+        "return (function(){ return {sx: window.screenX||0, sy: window.screenY||0,"
+        "oh: window.outerHeight, ih: window.innerHeight}; })();)")
+    bar = wi["oh"] - wi["ih"]
+    ax = coords["cx"] + wi["sx"]
+    ay = coords["cy"] + wi["sy"] + bar
+    print(f"  🖱️ 点击 Turnstile ({ax}, {ay})  bar={bar}")
+    _xclick(ax, ay)
+
+
+def handle_turnstile(sb) -> bool:
+    print("🔍 处理 Turnstile 验证...")
+    time.sleep(2)
+    if _ts_solved(sb):
+        print("  ✅ 已静默通过")
+        return True
+    for _ in range(3):
+        sb.execute_script(_EXPAND_JS)
+        time.sleep(0.5)
+    for attempt in range(6):
+        if _ts_solved(sb):
+            print(f"  ✅ Turnstile 通过（第{attempt+1}次）")
+            return True
+        sb.execute_script(_EXPAND_JS)
+        time.sleep(0.3)
+        _click_turnstile(sb)
+        for _ in range(8):
+            time.sleep(0.5)
+            if _ts_solved(sb):
+                print(f"  ✅ Turnstile 通过（第{attempt+1}次）")
+                return True
+        print(f"  ⚠️ 第{attempt+1}次未通过，重试...")
+    print("  ❌ Turnstile 6次均失败")
+    take_screenshot(sb, "turnstile_fail.png")
+    return False
+
+
+# ============================================================
+#   页面解析
+# ============================================================
+def get_time_left(sb) -> str:
+    """读取服务器详情页的剩余时间"""
+    try:
+        sb.wait_for_element_visible("#nextRenewalTime", timeout=8)
+        for _ in range(10):
+            t = sb.get_text("#nextRenewalTime").strip()
+            if t:
+                return t
+            time.sleep(0.5)
+    except:
+        pass
+    try:
+        t = sb.execute_script("""
+            (function() {
+                var els = Array.from(document.querySelectorAll('*'));
+                for (var i = 0; i < els.length; i++) {
+                    var txt = els[i].innerText || '';
+                    if (/\\d+\\s*day|\\d+h\\s*\\d+m|\\d+\\s*hour/.test(txt) && els[i].children.length === 0)
+                        return txt.trim();
+                }
+                return '';
+            })();
+        """)
+        if t:
+            return t
+    except:
+        pass
+    return ""
+
+
+def click_renew_button(sb) -> bool:
+    """尝试多种方式点击续期按钮"""
+    # 先滚动到底部确保按钮可见
+    sb.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+    time.sleep(1)
+
+    clicked = sb.execute_script("""
+        (function() {
+            // 方式1: span 文本含 Renew Server
+            var spans = document.querySelectorAll('span');
+            for (var i = 0; i < spans.length; i++) {
+                if (spans[i].innerText && spans[i].innerText.includes('Renew Server')) {
+                    var btn = spans[i].closest('button') || spans[i];
+                    btn.scrollIntoView({block:'center'});
+                    btn.click();
+                    return 'span:Renew Server';
+                }
+            }
+            // 方式2: button 文本含 Renew
+            var btns = document.querySelectorAll('button');
+            for (var i = 0; i < btns.length; i++) {
+                var t = btns[i].innerText || '';
+                if (t.includes('Renew')) {
+                    btns[i].scrollIntoView({block:'center'});
+                    btns[i].click();
+                    return 'button:' + t.trim().substring(0,30);
+                }
+            }
+            // 方式3: 任意元素文本含 Renew
+            var all = document.querySelectorAll('[class*="renew"],[id*="renew"],[class*="Renew"],[id*="Renew"]');
+            if (all.length > 0) {
+                all[0].scrollIntoView({block:'center'});
+                all[0].click();
+                return 'attr:renew';
+            }
+            return null;
+        })();
+    """)
+
+    if clicked:
+        print(f"✅ 已点击续期按钮（方式: {clicked}）")
+        return True
+
+    # 方式4: SeleniumBase XPath 备用
+    for xpath in [
+        "//span[contains(text(),'Renew Server')]",
+        "//button[contains(text(),'Renew')]",
+        "//span[contains(text(),'Renew')]",
+        "//*[contains(text(),'Renew Server')]",
+    ]:
+        try:
+            sb.wait_for_element_visible(xpath, timeout=3)
+            sb.click(xpath)
+            print(f"✅ 已点击续期按钮（XPath: {xpath}）")
+            return True
+        except:
+            continue
+
+    return False
+
+
+def _check_renew_result(sb):
+    """检测续期弹窗结果：success / cooldown / None"""
+    try:
+        return sb.execute_script("""
+            (function() {
+                var t = document.body.innerText || '';
+                if (t.includes('cooldown') || t.includes('too soon') || t.includes('wait')) return 'cooldown';
+                if (t.includes('success') || t.includes('Success') || t.includes('renewed')) return 'success';
+                var btns = document.querySelectorAll('button');
+                for (var i = 0; i < btns.length; i++) {
+                    if (btns[i].innerText.includes('Close') || btns[i].innerText.includes('OK'))
+                        return 'success';
+                }
+                return null;
+            })();
+        """)
+    except:
+        return None
+
+
+# ============================================================
+#   单个服务器续期
+# ============================================================
+def renew_server(sb, server: dict) -> bool:
+    sid = server["id"]
+    name = server["name"]
+    server_url = f"https://{DOMAIN}/server?id={sid}"
+    prefix = f"server_{sid}"
+
+    print("-" * 40)
+    print(f"🖥️  续期: {name}  (id={sid})")
+    print("-" * 40)
+
+    # ① 直接打开服务器详情页
+    print(f"🌐 访问: {server_url}")
+    sb.uc_open_with_reconnect(server_url, reconnect_time=4)
+    time.sleep(4)
+    take_screenshot(sb, f"{prefix}_loaded.png")
+
+    # ② 读取当前剩余时间
+    time_left = get_time_left(sb)
+    print(f"⏱️  当前剩余时间: {time_left or '未读取到'}")
+
+    # ③ 点击续期按钮
+    print("🔍 查找续期按钮...")
+    if not click_renew_button(sb):
+        # 打印页面所有按钮帮助调试
+        btns = sb.execute_script("""
+            (function() {
+                return Array.from(document.querySelectorAll('button,span')).map(function(b){
+                    return b.innerText.trim();
+                }).filter(function(t){ return t.length > 0 && t.length < 60; });
+            })();
+        """)
+        print(f"  页面按钮/span: {btns}")
+        take_screenshot(sb, f"{prefix}_no_btn.png")
+        send_tg(f"🖥 {name}\n❌ 未找到续期按钮\n时间: {now_str()}")
+        return False
+
+    time.sleep(3)
+    take_screenshot(sb, f"{prefix}_after_click.png")
+
+    # ④ 等待 Turnstile
+    print("⏳ 等待 Turnstile...")
+    ts_found = False
+    for _ in range(20):
+        if _ts_exists(sb):
+            print("✅ 检测到 Turnstile")
+            ts_found = True
+            break
+        # 提前检查是否已出现结果弹窗
+        r = _check_renew_result(sb)
+        if r:
+            print(f"ℹ️  点击后直接出现结果: {r}")
+            break
+        time.sleep(1)
+
+    if not ts_found and not _ts_exists(sb):
+        r = _check_renew_result(sb)
+        if r == "success":
+            print("🎉 续期成功（无需 Turnstile）！")
+            time_left = get_time_left(sb)
+            send_tg(f"🖥 {name}\n✅ 续期成功\n⏱️ 剩余: {time_left}\n时间: {now_str()}")
+            return True
+        print("❌ Turnstile 未出现")
+        take_screenshot(sb, f"{prefix}_no_turnstile.png")
+        send_tg(f"🖥 {name}\n❌ Turnstile 未出现\n时间: {now_str()}")
+        return False
+
+    # ⑤ 处理 Turnstile
+    if not handle_turnstile(sb):
+        take_screenshot(sb, f"{prefix}_ts_fail.png")
+        send_tg(f"🖥 {name}\n❌ Turnstile 验证失败\n时间: {now_str()}")
+        return False
+
+    # ⑥ 等待提交结果
+    print("⏳ 等待续期结果...")
+    start = time.time()
+    while time.time() - start < 30:
+        r = _check_renew_result(sb)
+        if r == "success":
+            print("🎉 检测到成功结果！")
+            break
+        if r == "cooldown":
+            print("⏳ 冷却期内")
+            break
+        time.sleep(1)
+
+    time.sleep(2)
+    take_screenshot(sb, f"{prefix}_result.png")
+
+    # ⑦ 刷新页面读取新时间
+    print("🔄 刷新页面确认剩余时间...")
+    sb.uc_open_with_reconnect(server_url, reconnect_time=3)
+    time.sleep(4)
+    new_time = get_time_left(sb)
+    print(f"⏱️  续期后剩余时间: {new_time or '未读取到'}")
+    take_screenshot(sb, f"{prefix}_final.png")
+
+    send_tg(f"🖥 {name}\n✅ 续期完成\n⏱️ 剩余: {new_time or '未知'}\n时间: {now_str()}")
+    return True
+
+
+# ============================================================
+#   登录
+# ============================================================
+def do_login(sb) -> bool:
+    print(f"🚀 访问登录页...")
+    sb.uc_open_with_reconnect(LOGIN_URL, reconnect_time=4)
+    time.sleep(3)
+
+    # 登录页可能有 Turnstile
+    for _ in range(10):
+        time.sleep(0.5)
+        if _ts_exists(sb):
+            break
+    if _ts_exists(sb):
+        print("🔍 登录页检测到 Turnstile，处理中...")
+        if not handle_turnstile(sb):
+            take_screenshot(sb, "login_ts_fail.png")
+            return False
+
+    print("⌨️  输入账号...")
+    try:
+        sb.wait_for_element_visible('input[name="identifier"]', timeout=15)
+        sb.type('input[name="identifier"]', ZAMPTO_ACCOUNT)
+        sb.click('button[type="submit"]')
+    except Exception as e:
+        print(f"❌ 账号输入失败: {e}")
+        take_screenshot(sb, "login_fail.png")
+        return False
+
+    print("⏳ 等待密码页...")
+    try:
+        sb.wait_for_element_visible('input[name="password"]', timeout=15)
+    except:
+        print("❌ 密码页未出现")
+        take_screenshot(sb, "password_page_fail.png")
+        return False
+
+    # 密码页可能有 Turnstile
+    for _ in range(10):
+        time.sleep(0.5)
+        if _ts_exists(sb):
+            break
+    if _ts_exists(sb):
+        print("🔍 密码页检测到 Turnstile，处理中...")
+        if not handle_turnstile(sb):
+            take_screenshot(sb, "password_ts_fail.png")
+            return False
+
+    print("⌨️  输入密码...")
+    sb.type('input[name="password"]', ZAMPTO_PASSWORD)
+    sb.click('button[name="submit"]')
+
+    print("⏳ 等待跳转 Homepage...")
+    for _ in range(60):
+        try:
+            if "/homepage" in sb.get_current_url():
+                print(f"✅ 登录成功: {sb.get_current_url()}")
+                return True
+        except:
+            pass
+        time.sleep(0.5)
+
+    print("❌ 登录超时")
+    take_screenshot(sb, "login_timeout.png")
+    return False
+
+
+# ============================================================
+#   主流程
+# ============================================================
+def main():
+    print("=" * 40)
+    print("   Zampto Auto Renew")
+    print("=" * 40)
+
+    # 代理可选：仅在设置了 GOST_PROXY 时才走本地 8080
+    sb_proxy = LOCAL_PROXY if LOCAL_PROXY else None
+
+    with SB(uc=True, test=True, proxy=sb_proxy) as sb:
+
+        print("🌐 检测出口 IP...")
+        try:
+            sb.open("https://api.ipify.org/?format=json")
+            print(f"✅ 出口 IP: {sb.get_text('body')}")
+        except:
+            print("⚠️ IP 检测超时")
+        print("-" * 40)
+
+        if not do_login(sb):
+            send_tg(f"❌ Zampto 登录失败\n时间: {now_str()}")
+            return
+
+        time.sleep(3)
+        print("-" * 40)
+
+        results = {}
+        for server in TARGET_SERVERS:
+            results[server["id"]] = renew_server(sb, server)
+
+        print("=" * 40)
+        print("📊 续期结果汇总：")
+        for s in TARGET_SERVERS:
+            status = "🎉 成功" if results[s["id"]] else "❌ 失败"
+            print(f"  {s['name']}: {status}")
+        print("=" * 40)
+        print("👋 完成")
+
+
+if __name__ == "__main__":
+    main()
