@@ -64,49 +64,13 @@ jobs:
             echo "📦 Hysteria 版本: $VER"
             wget -q "https://github.com/apernet/hysteria/releases/download/${VER}/hysteria-linux-amd64"
             chmod +x hysteria-linux-amd64
-            # 解析 hy2 链接生成配置
-            cat > parse_hy2.py <<'PYEOF'
-          import urllib.parse, json, os
-          url = os.environ['GOST_PROXY']
-          if url.startswith('hy2://'):
-              url = 'hysteria2://' + url[6:]
-          parsed = urllib.parse.urlparse(url)
-          password, host_port = parsed.password, parsed.netloc
-          if not host_port:
-              host_port = parsed.path
-          host, _, port = host_port.rpartition(':')
-          port = int(port or 443)
-          qs = urllib.parse.parse_qs(parsed.query)
-          insecure = qs.get('insecure', ['0'])[0].lower() in ('1', 'true', 'yes')
-          sni = qs.get('sni', [host])[0] or host
-          alpn = qs.get('alpn', ['h3'])[0]
-          obfs = qs.get('obfs', [''])[0]
-          obfs_password = qs.get('obfs-password', [''])[0]
-          auth = password if password else qs.get('auth', [''])[0]
-          cfg = {
-              "server": f"{host}:{port}",
-              "auth": auth,
-              "tls": {"sni": sni, "insecure": insecure},
-              "quic": {"initStreamReceiveWindow": 8388608, "maxStreamReceiveWindow": 8388608,
-                       "initConnReceiveWindow": 20971520, "maxConnReceiveWindow": 20971520},
-              "socks5": {"listen": f"127.0.0.1:{os.environ['LOCAL_PROXY_PORT']}"}
-          }
-          if alpn:
-              cfg["tls"]["alpn"] = alpn.split(',')
-          if obfs:
-              cfg["obfs"] = {"type": obfs}
-              if obfs_password:
-                  cfg["obfs"]["salamander"] = {"password": obfs_password}
-          json.dump(cfg, open('hy2_config.json', 'w'), indent=2)
-          print(json.dumps({k: (v if k != 'auth' else '***') for k, v in cfg.items()}, indent=2))
-          PYEOF
             python3 parse_hy2.py
             echo "📝 hy2_config.json:"
             cat hy2_config.json
             nohup ./hysteria-linux-amd64 client -c hy2_config.json > hy2.log 2>&1 &
-            sleep 5
-            echo "📝 hysteria 启动日志前 50 行:"
-            tail -n 50 hy2.log || true
+            sleep 6
+            echo "📝 hysteria 启动日志前 80 行:"
+            tail -n 80 hy2.log || true
             echo "✅ Hysteria2 客户端已启动于 $LOCAL_MIXED"
           else
             echo "🌐 使用 GOST 转发上游代理: $PROXY"
@@ -122,7 +86,7 @@ jobs:
             echo "✅ GOST 已启动于 $LOCAL_MIXED"
           fi
           echo "✅ 代理就绪，测试出口 IP..."
-          curl -s --connect-timeout 10 -x "$LOCAL_MIXED" https://api.ipify.org | sed 's/\([0-9]*\.[0-9]*\.\)[0-9]*\.[0-9]*/\1**.**/g' && echo "" || (echo "⚠️ 代理连通测试失败"; exit 1)
+          curl -s --connect-timeout 10 --max-time 15 -x "$LOCAL_MIXED" https://api.ipify.org | sed 's/\([0-9]*\.[0-9]*\.\)[0-9]*\.[0-9]*/\1**.**/g' && echo "" || (echo "⚠️ 代理连通测试失败"; exit 1)
 
       - name: 🚀 运行续期脚本
         env:
