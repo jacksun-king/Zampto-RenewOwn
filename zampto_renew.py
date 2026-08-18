@@ -18,15 +18,11 @@ ZAMPTO_ACCOUNT = os.environ.get("ZAMPTO_ACCOUNT", "")
 # ZAMPTO_PASSWORD: 你的 Zampto 登录密码（工作流未明确该变量名，这里兼容两种命名）
 ZAMPTO_PASSWORD = os.environ.get("ZAMPTO_PASSWORD", "") or os.environ.get("PASSWORD", "")
 
-# TG_BOT: Telegram 通知，支持两种格式
-#   1) "token:chatid"        （与工作流 secrets.TG_BOT 对应）
-#   2) 分别设置 TG_TOKEN / TG_ID
-_TG_BOT = os.environ.get("TG_BOT", "")
-if _TG_BOT and ":" in _TG_BOT:
-    TG_TOKEN, TG_ID = _TG_BOT.split(":", 1)
-else:
-    TG_TOKEN = os.environ.get("TG_TOKEN", "")
-    TG_ID = os.environ.get("TG_ID", "")
+# TG 通知：token 与 channel 必须分开存储（不兼容 "token:chatid" 合并写法）
+#   TG_BOT_TOKEN: bot token，形如 123456:ABC-DEF...（本身含冒号，故不可与 chat_id 合并）
+#   TG_CHAT_ID:   接收者，形如 123456789（用户 ID）或 @channel_name（频道/群组）
+TG_TOKEN = os.environ.get("TG_BOT_TOKEN", "") or os.environ.get("TG_TOKEN", "")
+TG_ID = os.environ.get("TG_CHAT_ID", "") or os.environ.get("TG_ID", "")
 
 # GOST_PROXY: 上游代理链接（支持 hy2://、hysteria2://、socks5://、http:// 等）。
 #   工作流会把它转成统一的本地 SOCKS5 端口 127.0.0.1:1080，脚本直接走本地端口。
@@ -83,14 +79,18 @@ def _proxies():
 
 def send_tg(msg: str):
     if not TG_TOKEN or not TG_ID:
+        print("⚠️ 未配置 TG_BOT_TOKEN / TG_CHAT_ID，跳过通知")
         return
-    url = (f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-           f"?chat_id={TG_ID}&text={requests.utils.quote(msg)}")
+    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     try:
-        requests.get(url, timeout=10, proxies=_proxies())
-        print("✅ Telegram 消息已发送")
+        r = requests.post(url, timeout=15, proxies=_proxies(),
+                          json={"chat_id": TG_ID, "text": msg, "parse_mode": "HTML"})
+        if r.status_code == 200 and r.json().get("ok"):
+            print("✅ Telegram 消息已发送")
+        else:
+            print(f"⚠️ TG 通知被拒绝: HTTP {r.status_code} {r.text[:200]}")
     except Exception as e:
-        print(f"⚠️ TG 通知失败: {e}")
+        print(f"⚠️ TG 通知发送异常: {e}")
 
 
 def take_screenshot(sb, filename: str):
