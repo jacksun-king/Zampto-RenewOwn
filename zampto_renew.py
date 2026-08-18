@@ -850,37 +850,87 @@ def click_renew_button(sb) -> bool:
 
 
 def _check_renew_result(sb):
-    """检测续期弹窗/弹框结果：success / cooldown / None"""
+    """检测续期弹窗/弹框结果：success / cooldown / None
+    只认弹框（modal）内的结果文案：优先匹配"续期完成/成功"（中英文），
+    其次冷却文案；弹框内存在 Close/OK 按钮作为结果已出的兜底信号。"""
     try:
         result = sb.execute_script("""
             (function() {
-                var allText = document.body.innerText || '';
-                // 弹框优先级更高：优先读取弹框内的文字
+                // 成功文案（Zampto 实际弹框的中英文都可能出现，已做双语言覆盖）
+                var OK_RE = /server has been renewed successfully|has been renewed|renewed successfully|server renewed|successfully renewed|renewal completed|续期完成|已成功续期|续期成功|延期成功|成功延长|服务器.*(?:已经|已).*续期|renew success/i;
+                // 冷却/未到可续期时间文案
+                var CD_RE = /cooldown|too soon|try again later|still on cooldown|not available yet|冷却|太早|未到.*时间|请.*再试/i;
                 var modals = document.querySelectorAll('div[role="dialog"], div[role="alertdialog"], .modal, [class*="modal"], [class*="dialog"], [class*="Dialog"]');
+                var modalText = '';
+                var hasModal = false;
                 for (var m = 0; m < modals.length; m++) {
-                    var mt = modals[m].innerText || '';
-                    if (mt) allText = mt + '\\n' + allText;
-                    var mbtns = modals[m].querySelectorAll('button');
-                    for (var i = 0; i < mbtns.length; i++) {
-                        var txt = mbtns[i].innerText.trim();
-                        if (txt.includes('Close') || txt.includes('OK') || txt.includes('Confirm') || txt.includes('Done'))
-                            return 'success';
+                    var mt = (modals[m].innerText || '').trim();
+                    if (!mt) continue;
+                    hasModal = true;
+                    modalText += mt + '\\n';
+                }
+                // 1) 弹框内成功文案（最高优先级：用户要求等"续期完成"出现）
+                if (hasModal && OK_RE.test(modalText)) return 'success';
+                // 2) 弹框内冷却文案
+                if (hasModal && CD_RE.test(modalText)) return 'cooldown';
+                // 3) 弹框内存在关闭/确定按钮 → 结果弹窗已加载完成
+                if (hasModal) {
+                    for (var m = 0; m < modals.length; m++) {
+                        var mbtns = modals[m].querySelectorAll('button');
+                        for (var i = 0; i < mbtns.length; i++) {
+                            var txt = (mbtns[i].innerText || '').trim();
+                            if (/close|ok|done|confirm|关闭|确定|完成/i.test(txt)) return 'success';
+                        }
                     }
                 }
-                if (/cooldown|too soon|wait|please wait|try again later/i.test(allText)) return 'cooldown';
-                if (/server has been renewed successfully|success|renewed|completed|confirmed|server renewed/i.test(allText)) return 'success';
-                var btns = document.querySelectorAll('button');
-                for (var i = 0; i < btns.length; i++) {
-                    var txt = btns[i].innerText.trim();
-                    if (txt.includes('Close') || txt.includes('OK'))
-                        return 'success';
-                }
+                // 4) 兜底：整页文本匹配
+                var allText = document.body.innerText || '';
+                if (OK_RE.test(allText)) return 'success';
+                if (CD_RE.test(allText)) return 'cooldown';
                 return null;
             })();
         """)
         return result
     except:
         return None
+
+
+def close_result_modal(sb):
+    """关闭续期结果弹框：优先点击弹框内的 Close/OK/× 等按钮，兜底直接移除弹框。"""
+    try:
+        ok = sb.execute_script("""
+            (function() {
+                var modals = document.querySelectorAll('div[role="dialog"], div[role="alertdialog"], .modal, [class*="modal"], [class*="dialog"], [class*="Dialog"]');
+                // 1) 优先点按钮
+                for (var m = 0; m < modals.length; m++) {
+                    var btns = modals[m].querySelectorAll('button, [role="button"], svg[class*="close"], [aria-label*="close" i], [class*="close" i]');
+                    for (var i = 0; i < btns.length; i++) {
+                        var el = btns[i];
+                        var t = ((el.innerText || '') + ' ' + (el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('title') || '') + ' ' + (el.className || '')).toLowerCase();
+                        if (/close|ok|done|confirm|cancel|关闭|确定|完成|退出|×|✕|✖/i.test(t)) {
+                            try { el.click(); return 'click:' + t.trim().substring(0, 30); } catch(e) {}
+                        }
+                    }
+                }
+                // 2) 兜底：移除与续期结果相关的弹框
+                for (var m = 0; m < modals.length; m++) {
+                    var t = (modals[m].innerText || '').toLowerCase();
+                    if (/renew|续期|成功|success|renewed|completed|cooldown|冷却/i.test(t)) {
+                        modals[m].remove();
+                        return 'removed:' + t.trim().substring(0, 30);
+                    }
+                }
+                // 3) 再兜底：移除所有 dialog（仅当存在时）
+                for (var m = 0; m < modals.length; m++) {
+                    modals[m].remove();
+                }
+                return modals.length ? 'removed-all' : 'no-modal';
+            })();
+        """)
+        print(f"  🧹 关闭结果弹框: {ok}")
+        _rand_sleep(0.5, 1.0)
+    except Exception as e:
+        print(f"  ⚠️ 关闭弹框异常（可忽略）: {e}")
 
 
 # ============================================================
@@ -906,7 +956,7 @@ def renew_server(sb, server: dict) -> bool:
     time_left = get_time_left(sb)
     print(f"⏱️  当前剩余时间: {time_left or '未读取到'}")
 
-    # ②B 清理页面上的非必要弹窗/广告，避免遮挡或干扰 Turnstile
+    # ②B 清理页面上的非必要弹窗/广告，避免遮挡续期按钮或结果弹框
     print("🧹 清理页面弹窗、cookie consent、广告条...")
     close_all_popups(sb)
 
@@ -929,104 +979,37 @@ def renew_server(sb, server: dict) -> bool:
     time.sleep(3)
     take_screenshot(sb, f"{prefix}_after_click.png")
 
-    # ④ 等待弹框内的 Turnstile 加载（不能刷新页面，否则弹框会消失）
-    #    检测到 Loading security verification 即开始等，至少等 3 分钟（180s）让 Turnstile 出现；
-    #    若 3 分钟内仍未出现，视为失败，交由下方 max_retry 重新触发续期按钮。
-    print(f"⏳ 等待 Turnstile 加载（检测到 Loading 后至少等 180s，不刷新页面）... [{now_str()}]")
-    ts_found = False
-    pre_result = None
-    for _ in range(180):
-        if _ts_exists(sb, label="弹框等待", detect_loading=True):
-            print(f"✅ 检测到 Loading/真正出现 Turnstile，停止等待循环，进入处理（第 {_+1}s）")
-            ts_found = True
-            break
-        # 提前检查是否已出现结果弹窗
-        r = _check_renew_result(sb)
-        if r:
-            pre_result = r
-            print(f"ℹ️  点击后直接出现结果: {r}（第 {_+1}s）")
-            break
-        time.sleep(1)
-
-    if not ts_found and not pre_result:
-        r = _check_renew_result(sb)
-        if r == "success":
-            print("🎉 续期成功（无需 Turnstile）！")
-            time_left = get_time_left(sb)
-            send_tg(f"🖥 {name}\n✅ 续期成功\n⏱️ 剩余: {time_left}\n时间: {now_str()}")
-            return True
-        print(f"❌ 3 分钟内 Turnstile 未出现，交由重触发续期按钮重试")
-        take_screenshot(sb, f"{prefix}_no_turnstile.png")
-
-    # ⑤ 处理 Turnstile（弹框模式：不刷新页面，失败时重新点击 Renew Server 触发弹框）
-    def retry_renew_modal():
-        print("    重新查找并点击 Renew Server... [重触发弹框]")
-        # 重触发前先等久一点，避免 Turnstile 还没加载完就反复点按钮
-        print(f"    ⏳ 重触发前等待 20s，让弹框充分加载... [{now_str()}]")
-        time.sleep(20)
-        try:
-            print("    🧹 重触发前清理页面弹窗/广告...")
-            close_all_popups(sb)
-            _rand_sleep(0.5, 1.0)
-        except Exception as e:
-            print(f"    关闭旧弹框失败（可忽略）: {e}")
-        ok = click_renew_button(sb)
-        if ok:
-            print("    ✅ 已重新点击 Renew Server 触发弹框")
-        else:
-            print("    ⚠️ 重新点击 Renew Server 失败（可能弹框已不在页面上）")
-        return ok
-
-    # 处理 Turnstile 前再清理一次页面弹窗/广告
-    close_all_popups(sb)
-
-    if not handle_turnstile(sb, current_url="", no_refresh=True,
-                             on_retry=retry_renew_modal, max_retry=2,
-                             skip_wait=(not ts_found)):
-        take_screenshot(sb, f"{prefix}_ts_fail.png")
-        send_tg(f"🖥 {name}\n❌ Turnstile 验证失败（未重跑工作流，已自动停止重试以保护节点）\n时间: {now_str()}")
-        return False
-
-    # ⑥ 等待提交结果（弹框内）：处理完 Turnstile 后，等待 "Server has been renewed successfully"
-    print(f"⏳ 等待续期结果（最多 40s）... [{now_str()}]")
+    # ④ 等待弹出续期结果（不再处理 Turnstile）
+    #    点击续期后弹框可能会短暂加载，一直等到弹框内出现
+    #    "续期完成/成功" 或 "冷却中" 文案为止；最多等 120s。
+    print(f"⏳ 等待续期结果弹框（最多 120s，不处理 Turnstile）... [{now_str()}]")
     start = time.time()
     final_status = "unknown"
-    while time.time() - start < 40:
+    while time.time() - start < 120:
         r = _check_renew_result(sb)
         if r == "success":
-            print(f"🎉 检测到续期成功文案（耗时 {time.time()-start:.1f}s）")
+            print(f"🎉 弹框已出现续期完成文案（耗时 {time.time()-start:.1f}s）")
             final_status = "success"
             break
         if r == "cooldown":
-            print(f"⏳ 冷却期内（耗时 {time.time()-start:.1f}s）")
+            print(f"ℹ️ 弹框显示冷却中（耗时 {time.time()-start:.1f}s）")
             final_status = "cooldown"
             break
         elapsed = int(time.time() - start)
-        if elapsed > 0 and elapsed % 10 == 0:
-            print(f"    ...已等 {elapsed}s，尚未检测到结果")
+        if elapsed > 0 and elapsed % 15 == 0:
+            print(f"    ...已等 {elapsed}s，弹框仍在加载/未出现结果")
         time.sleep(1)
+
     if final_status == "unknown":
-        print(f"⚠️ 40s 内未检测到明确结果，继续后续确认流程")
+        print("⚠️ 120s 内未检测到明确结果弹框，按未知处理，仍会读取剩余时长")
+    time.sleep(1)
+    take_screenshot(sb, f"{prefix}_modal_result.png")
 
-    time.sleep(2)
-    take_screenshot(sb, f"{prefix}_result.png")
+    # ⑤ 关闭结果弹框，再刷新页面读取新的剩余续期时长
+    print("🧹 关闭结果弹框...")
+    close_result_modal(sb)
 
-    # ⑦ 关闭可能的弹框后再刷新页面读取新时间（不要直接刷新，避免弹框阻塞）
     print("🔄 刷新页面确认剩余时间...")
-    try:
-        sb.execute_script("""
-            (function(){
-                var closeBtns = document.querySelectorAll('button, svg, [class*="close"], [aria-label*="close" i]');
-                for (var i = 0; i < closeBtns.length; i++) {
-                    var t = closeBtns[i].innerText || closeBtns[i].getAttribute('aria-label') || '';
-                    if (/close|×|x/i.test(t)) { closeBtns[i].click(); break; }
-                }
-            })();
-        """)
-        _rand_sleep(0.5, 1.0)
-    except Exception as e:
-        print(f"  ⚠️ 关闭弹框失败（可忽略）: {e}")
-
     sb.uc_open_with_reconnect(server_url, reconnect_time=3)
     time.sleep(4)
     new_time = get_time_left(sb)
