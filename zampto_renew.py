@@ -692,13 +692,26 @@ def close_all_popups(sb):
                     d.style.display = 'none'; d.remove(); removed++;
                 });
                 // 3) 非 Turnstile iframe 广告（如 Discover more 等）
+                //    重要：若 iframe 位于 Renew Server 弹框内部（父级含 'renew server'/'security verification'），
+                //    一律保留——即使此刻 src 还没变成 cloudflare/turnstile（Turnstile 正在 Loading 阶段）。
                 document.querySelectorAll('iframe').forEach(function(f) {
+                    // 向上找祖先，判断是否在续期弹框内
+                    var inRenew = false;
+                    var p = f.parentElement;
+                    for (var k = 0; k < 6 && p; k++) {
+                        var pt = (p.innerText || p.getAttribute('aria-label') || p.className || '').toLowerCase();
+                        if (pt.indexOf('renew server') !== -1 || pt.indexOf('security verification') !== -1) {
+                            inRenew = true; break;
+                        }
+                        p = p.parentElement;
+                    }
+                    if (inRenew) return;  // 续期弹框内的 iframe 全部保留，绝不误删
                     var src = (f.src || '').toLowerCase();
                     if (src.indexOf('cloudflare') === -1 && src.indexOf('turnstile') === -1) {
                         f.style.display = 'none'; f.remove(); removed++;
                     }
                 });
-                // 4) 固定定位的高 z-index overlay/backdrop
+                // 4) 固定定位的高 z-index overlay/backdrop（仅移除与续期弹框无关的）
                 document.querySelectorAll('div').forEach(function(el) {
                     var style = window.getComputedStyle(el);
                     if (style.position === 'fixed' && parseInt(style.zIndex || 0) > 1000) {
@@ -706,7 +719,19 @@ def close_all_popups(sb):
                         // 如果它覆盖了大半个屏幕但不是 Renew Server 弹框，移除
                         if (w > window.innerWidth * 0.5 && h > window.innerHeight * 0.5) {
                             var t = (el.innerText || '').toLowerCase();
-                            if (t.indexOf('renew server') === -1 && t.indexOf('security verification') === -1) {
+                            if (t.indexOf('renew server') !== -1 || t.indexOf('security verification') !== -1) {
+                                return;  // 续期弹框本身，保留
+                            }
+                            // 向上检查祖先，避免误删续期弹框的遮罩层
+                            var inRenew = false, ap = el.parentElement;
+                            for (var k = 0; k < 6 && ap; k++) {
+                                var apt = (ap.innerText || ap.className || '').toLowerCase();
+                                if (apt.indexOf('renew server') !== -1 || apt.indexOf('security verification') !== -1) {
+                                    inRenew = true; break;
+                                }
+                                ap = ap.parentElement;
+                            }
+                            if (!inRenew) {
                                 el.style.display = 'none'; el.remove(); removed++;
                             }
                         }
