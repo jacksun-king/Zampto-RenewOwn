@@ -19,24 +19,18 @@ jobs:
         with:
           python-version: '3.x'
 
-      - name: 💾 缓存 apt 包
-        uses: actions/cache@v4
-        with:
-          path: |
-            /var/cache/apt/archives
-            /var/lib/apt/lists
-          key: apt-${{ runner.os }}-${{ github.run_id }}
-          restore-keys: apt-${{ runner.os }}-
-
       - name: 🛠️ 安装系统依赖（Ubuntu runner 已自带 Chrome）
         run: |
           # runner 已预装 google-chrome-stable，不再重复安装，避免卡在 Google 源
+          # 换 Azure 镜像加速 apt，并设置超时避免卡死
+          sudo bash -c 'source /etc/os-release && echo "deb http://azure.archive.ubuntu.com/ubuntu/ ${VERSION_CODENAME} main restricted universe multiverse" > /etc/apt/sources.list'
+          sudo bash -c 'source /etc/os-release && echo "deb http://azure.archive.ubuntu.com/ubuntu/ ${VERSION_CODENAME}-updates main restricted universe multiverse" >> /etc/apt/sources.list'
+          sudo bash -c 'source /etc/os-release && echo "deb http://azure.archive.ubuntu.com/ubuntu/ ${VERSION_CODENAME}-security main restricted universe multiverse" >> /etc/apt/sources.list'
           sudo apt-get update -qq || true
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
             xvfb \
             x11-utils \
-            xdotool \
-            scrot
+            xdotool
 
       - name: ✅ 验证系统 Chrome
         run: |
