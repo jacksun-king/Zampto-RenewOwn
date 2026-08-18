@@ -33,7 +33,7 @@ GOST_PROXY = os.environ.get("GOST_PROXY", "")
 LOCAL_PROXY = "http://127.0.0.1:8080" if GOST_PROXY else ""
 
 # LOGIN_URL: Zampto 登录页地址；默认保留带 app_id 的旧地址，可通过环境变量覆盖
-LOGIN_URL = os.environ.get("LOGIN_URL", "https://auth.zampto.net/sign-in?app_id=bmhk6c8qdqxphlyscztgl")
+LOGIN_URL = os.environ.get("LOGIN_URL", "https://dash.zampto.net/auth/login")
 DOMAIN = os.environ.get("ZAMPTO_DOMAIN", "dash.zampto.net")
 
 # TARGET_SERVERS: JSON 字符串，例如 '[{"id":"4480","name":"java"},{"id":"4481","name":"python"}]'
@@ -444,7 +444,7 @@ def renew_server(sb, server: dict) -> bool:
 #   登录
 # ============================================================
 def do_login(sb) -> bool:
-    print(f"🚀 访问登录页...")
+    print(f"🚀 访问登录页: {LOGIN_URL}")
     sb.uc_open_with_reconnect(LOGIN_URL, reconnect_time=4)
     time.sleep(3)
 
@@ -459,44 +459,73 @@ def do_login(sb) -> bool:
             take_screenshot(sb, "login_ts_fail.png")
             return False
 
-    print("⌨️  输入账号...")
-    try:
-        sb.wait_for_element_visible('input[name="identifier"]', timeout=15)
-        sb.type('input[name="identifier"]', ZAMPTO_ACCOUNT)
-        sb.click('button[type="submit"]')
-    except Exception as e:
-        print(f"❌ 账号输入失败: {e}")
+    def _fill_and_submit(email_selector, pass_selector):
+        """尝试在给定选择器上填账号密码并提交，成功返回 True"""
+        try:
+            sb.wait_for_element_visible(email_selector, timeout=15)
+        except Exception:
+            return False
+        sb.type(email_selector, ZAMPTO_ACCOUNT)
+        # 单页表单：密码框可能已在当前页
+        try:
+            sb.wait_for_element_visible(pass_selector, timeout=15)
+            sb.type(pass_selector, ZAMPTO_PASSWORD)
+        except Exception:
+            # 两步登录：先提交账号，再等密码页
+            try:
+                sb.click('button[type="submit"]')
+            except Exception:
+                pass
+            try:
+                sb.wait_for_element_visible(pass_selector, timeout=15)
+                sb.type(pass_selector, ZAMPTO_PASSWORD)
+            except Exception:
+                return False
+        # 提交
+        for sel in ['button[type="submit"]', 'button[name="submit"]', 'button']:
+            try:
+                sb.click(sel)
+                break
+            except Exception:
+                continue
+        return True
+
+    print("⌨️  输入账号密码...")
+    ok = False
+    for email_sel, pass_sel in [
+        ('input[name="email"]', 'input[name="password"]'),
+        ('input[name="identifier"]', 'input[name="password"]'),
+        ('input[type="email"]', 'input[type="password"]'),
+    ]:
+        if _fill_and_submit(email_sel, pass_sel):
+            ok = True
+            break
+        else:
+            print(f"  ⚠️ 未找到登录框: {email_sel}")
+
+    if not ok:
+        print("❌ 未能定位登录表单")
         take_screenshot(sb, "login_fail.png")
         return False
 
-    print("⏳ 等待密码页...")
-    try:
-        sb.wait_for_element_visible('input[name="password"]', timeout=15)
-    except:
-        print("❌ 密码页未出现")
-        take_screenshot(sb, "password_page_fail.png")
-        return False
-
-    # 密码页可能有 Turnstile
+    # 提交后可能还有 Turnstile
     for _ in range(10):
         time.sleep(0.5)
         if _ts_exists(sb):
             break
     if _ts_exists(sb):
-        print("🔍 密码页检测到 Turnstile，处理中...")
+        print("🔍 提交后检测到 Turnstile，处理中...")
         if not handle_turnstile(sb):
             take_screenshot(sb, "password_ts_fail.png")
             return False
 
-    print("⌨️  输入密码...")
-    sb.type('input[name="password"]', ZAMPTO_PASSWORD)
-    sb.click('button[name="submit"]')
-
-    print("⏳ 等待跳转 Homepage...")
+    print("⏳ 等待跳转登录成功...")
     for _ in range(60):
         try:
-            if "/homepage" in sb.get_current_url():
-                print(f"✅ 登录成功: {sb.get_current_url()}")
+            url = sb.get_current_url()
+            # dash.zampto.net 登录成功后跳到面板首页（非 /auth/login）
+            if "/auth/login" not in url and DOMAIN in url:
+                print(f"✅ 登录成功: {url}")
                 return True
         except:
             pass
@@ -510,10 +539,34 @@ def do_login(sb) -> bool:
 # ============================================================
 #   主流程
 # ============================================================
+def _preflight():
+    """运行前先探测登录页是否可达，避免卡在浏览器里浪费时间"""
+    print("🔎 预检：探测登录页连通性...")
+    test_url = LOGIN_URL if LOGIN_URL else f"https://{DOMAIN}/auth/login"
+    try:
+        r = requests.get(test_url, timeout=20, proxies=_proxies(),
+                         headers={"User-Agent": "Mozilla/5.0"})
+        print(f"  HTTP {r.status_code}  {test_url}")
+        if r.status_code >= 500:
+            print("  ❌ 服务端/网关错误（如 522），登录页不可达")
+            return False
+        if r.status_code >= 400:
+            print("  ⚠️ 返回 4xx，可能需带正确参数，但服务可达")
+        return True
+    except Exception as e:
+        print(f"  ❌ 登录页无法访问: {e}")
+        return False
+
+
 def main():
     print("=" * 40)
     print("   Zampto Auto Renew")
     print("=" * 40)
+
+    # 预检登录页连通性
+    if not _preflight():
+        send_tg(f"❌ Zampto 登录页不可达（{LOGIN_URL}）\n时间: {now_str()}")
+        raise SystemExit("❌ 登录页不可达，请检查 LOGIN_URL / 代理 / 网络")
 
     # 代理可选：仅在设置了 GOST_PROXY 时才走本地 8080
     sb_proxy = LOCAL_PROXY if LOCAL_PROXY else None
