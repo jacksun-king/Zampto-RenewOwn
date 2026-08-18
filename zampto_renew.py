@@ -171,6 +171,31 @@ def _rand_sleep(a=0.3, b=0.8):
     time.sleep(a + (b - a) * (hash(str(time.time())) % 1000 / 1000.0))
 
 
+def _humanize(sb):
+    """模拟人类行为：随机滚动、鼠标移动，降低被风控概率。"""
+    try:
+        sb.execute_script("""
+            (function() {
+                var h = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
+                var y = Math.floor(Math.random() * Math.min(h, 600));
+                window.scrollTo({top: y, behavior: 'smooth'});
+            })();
+        """)
+        _rand_sleep(0.3, 0.8)
+        # 在页面中心附近随机移动鼠标
+        try:
+            from selenium.webdriver.common.action_chains import ActionChains
+            body = sb.driver.find_element("tag name", "body")
+            chain = ActionChains(sb.driver)
+            chain.move_to_element_with_offset(body, -100 + int(200 * (hash(str(time.time())) % 1000 / 1000.0)),
+                                              -150 + int(300 * (hash(str(time.time() + 1)) % 1000 / 1000.0)))
+            chain.perform()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
 def _dump_turnstile_state(sb, label=""):
     """输出当前 Turnstile 状态，方便排查。"""
     try:
@@ -200,23 +225,24 @@ def _dump_turnstile_state(sb, label=""):
 
 
 def _click_turnstile(sb):
-    """多策略点击 Turnstile：SeleniumBase 原生 > iframe 内真实点击 > JS 事件 > xdotool。"""
+    """多策略处理 Turnstile：SeleniumBase 原生 > iframe 内真实点击 > JS 事件 > xdotool。
+    对隐藏式 invisible Turnstile 不强行点击，而是用人类化行为等待 token 自动生成。"""
     _dump_turnstile_state(sb, "点击前")
 
-    # 策略1：SeleniumBase 自带的 undetected 点击能力
+    # 策略1：SeleniumBase 自带的 undetected 能力
     try:
         sb.execute_script(_EXPAND_JS)
         _rand_sleep(0.2, 0.5)
         if hasattr(sb, "handle_turnstile"):
             sb.handle_turnstile()
             print("  🖱️ 已调用 SeleniumBase handle_turnstile")
-            _rand_sleep(0.8, 1.5)
+            _rand_sleep(1.0, 2.0)
             if _ts_solved(sb):
                 return
     except Exception as e:
         print(f"  ⚠️ SeleniumBase handle_turnstile 未成功: {e}")
 
-    # 策略2：切进 Turnstile iframe，点击内部真实 checkbox
+    # 策略2：判断是否为 invisible Turnstile：iframe 隐藏/极小则不要点，做人类化行为等 token
     iframe_info = None
     try:
         iframe_info = sb.execute_script("""
@@ -226,16 +252,32 @@ def _click_turnstile(sb):
                     var src = list[i].src || '';
                     if (src.includes('challenges.cloudflare.com') || src.includes('turnstile')) {
                         var r = list[i].getBoundingClientRect();
-                        return {index: i, x: r.x, y: r.y, w: r.width, h: r.height};
+                        var cs = window.getComputedStyle(list[i]);
+                        return {index: i, x: r.x, y: r.y, w: r.width, h: r.height,
+                                hidden: r.width < 10 || r.height < 10 || cs.visibility === 'hidden'};
                     }
                 }
                 return null;
             })();
         """)
-        if iframe_info:
-            print(f"  📍 定位到 Turnstile iframe #{iframe_info['index']} ({iframe_info['w']}x{iframe_info['h']}) @({iframe_info['x']},{iframe_info['y']})")
+        if iframe_info and iframe_info.get("hidden"):
+            print("  🫥 检测到隐藏式 invisible Turnstile，不点击，模拟人类行为等待 token...")
+            _humanize(sb)
+            _rand_sleep(2.0, 4.0)
+            if _ts_solved(sb):
+                return
+            # 再等一轮
+            _humanize(sb)
+            _rand_sleep(2.0, 4.0)
+            return
+    except Exception as e:
+        print(f"  ⚠️ invisible Turnstile 处理失败: {e}")
+
+    # 策略3：切进可见的 Turnstile iframe，点击内部真实 checkbox
+    if iframe_info and not iframe_info.get("hidden"):
+        try:
+            print(f"  📍 定位到可见 Turnstile iframe #{iframe_info['index']} ({iframe_info['w']}x{iframe_info['h']}) @({iframe_info['x']},{iframe_info['y']})")
             idx = iframe_info["index"]
-            # 兼容多种 SeleniumBase 版本查找 iframe 的方式
             iframes = []
             try:
                 iframes = sb.find_elements("iframe")
@@ -264,21 +306,18 @@ def _click_turnstile(sb):
                 if _ts_solved(sb):
                     return
                 if clicked_inside:
-                    # 点了但没过，可能是风控，不再继续别的策略，让上层刷新重试
                     return
             else:
                 print(f"  ⚠️ iframe 索引 {idx} 越界(共{len(iframes)}个)")
-        else:
-            print("  ⚠️ JS 未找到 Turnstile iframe")
-    except Exception as e:
-        print(f"  ⚠️ iframe 内点击失败: {e}")
-    finally:
-        try:
-            sb.switch_to_default_content()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"  ⚠️ iframe 内点击失败: {e}")
+        finally:
+            try:
+                sb.switch_to_default_content()
+            except Exception:
+                pass
 
-    # 策略3：JS 点击 iframe 或父容器
+    # 策略4：JS 点击可见 iframe 或父容器（仅对可见元素）
     try:
         js_ok = sb.execute_script("""
             (function() {
@@ -287,11 +326,11 @@ def _click_turnstile(sb):
                     var src = iframes[i].src || '';
                     if (src.includes('challenges.cloudflare.com') || src.includes('turnstile')) {
                         var r = iframes[i].getBoundingClientRect();
-                        if (r.width > 0 && r.height > 0) {
+                        if (r.width > 30 && r.height > 30) {
                             ['mousedown','mouseup','click'].forEach(function(t){
                                 iframes[i].dispatchEvent(new MouseEvent(t, {
                                     bubbles: true, cancelable: true,
-                                    clientX: r.x + 30, clientY: r.y + r.height/2,
+                                    clientX: r.x + r.width/2, clientY: r.y + r.height/2,
                                     view: window
                                 }));
                             });
@@ -329,7 +368,7 @@ def _click_turnstile(sb):
     except Exception as e:
         print(f"  ⚠️ JS 点击 Turnstile 失败: {e}")
 
-    # 策略4：回退到 xdotool 屏幕坐标
+    # 策略5：回退到 xdotool 屏幕坐标（仅对可见元素）
     print("  🖱️ 回退到 xdotool 点击...")
     try:
         coords = sb.execute_script("""
@@ -339,8 +378,8 @@ def _click_turnstile(sb):
                     var src = iframes[i].src || '';
                     if (src.includes('challenges.cloudflare.com') || src.includes('turnstile')) {
                         var r = iframes[i].getBoundingClientRect();
-                        if (r.width > 0 && r.height > 0)
-                            return {cx: Math.round(r.x + 30), cy: Math.round(r.y + r.height/2)};
+                        if (r.width > 30 && r.height > 30)
+                            return {cx: Math.round(r.x + r.width/2), cy: Math.round(r.y + r.height/2)};
                     }
                 }
                 var inp = document.querySelector('input[name="cf-turnstile-response"]');
@@ -358,10 +397,9 @@ def _click_turnstile(sb):
             })();
         """)
         if not coords:
-            print("  ⚠️ 无法定位 Turnstile 坐标")
+            print("  ⚠️ 无法定位可见 Turnstile 坐标")
             _dump_turnstile_state(sb, "无坐标")
             return
-        # 窗口坐标修正：考虑浏览器窗口在屏幕上的位置
         wi = sb.execute_script(
             "return (function(){ return {sx: window.screenX||0, sy: window.screenY||0,"
             "oh: window.outerHeight, ih: window.innerHeight, py: window.screenTop||window.screenY||0}; })();")
@@ -378,23 +416,27 @@ def _click_turnstile(sb):
 
 def handle_turnstile(sb, current_url: str = "") -> bool:
     print("🔍 处理 Turnstile 验证...")
-    time.sleep(2)
+    # 先给 Turnstile 充分初始化时间，invisible 版本经常需要 5~10 秒才能出 token
+    time.sleep(4)
     if _ts_solved(sb):
         print("  ✅ 已静默通过")
         return True
     for _ in range(3):
         sb.execute_script(_EXPAND_JS)
-        time.sleep(0.5)
+        _humanize(sb)
+        time.sleep(1.0)
     for attempt in range(6):
         if _ts_solved(sb):
             print(f"  ✅ Turnstile 通过（第{attempt+1}次）")
             return True
         print(f"\n  🔄 Turnstile 第 {attempt+1}/6 次尝试...")
         sb.execute_script(_EXPAND_JS)
-        time.sleep(0.3)
+        _humanize(sb)
+        time.sleep(0.8)
         _click_turnstile(sb)
-        for _ in range(10):
-            time.sleep(0.6)
+        # 每次尝试后等待更久
+        for _ in range(12):
+            time.sleep(1.0)
             if _ts_solved(sb):
                 print(f"  ✅ Turnstile 通过（第{attempt+1}次）")
                 return True
@@ -404,10 +446,11 @@ def handle_turnstile(sb, current_url: str = "") -> bool:
             print("  🔄 刷新页面重置 Turnstile...")
             try:
                 sb.uc_open_with_reconnect(current_url, reconnect_time=3)
-                time.sleep(3)
+                time.sleep(5)
                 for _ in range(3):
                     sb.execute_script(_EXPAND_JS)
-                    time.sleep(0.5)
+                    _humanize(sb)
+                    time.sleep(1.0)
             except Exception as e:
                 print(f"  ⚠️ 刷新失败: {e}")
     print("  ❌ Turnstile 6次均失败")
