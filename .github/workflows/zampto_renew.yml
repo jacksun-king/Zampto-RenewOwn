@@ -73,6 +73,7 @@ jobs:
           ZAMPTO_PASSWORD: ${{ secrets.ZAMPTO_PASSWORD }}
           TARGET_SERVERS: ${{ secrets.TARGET_SERVERS }}
           LOGIN_URL: ${{ secrets.LOGIN_URL }}
+          ZAMPTO_APP_ID: ${{ secrets.ZAMPTO_APP_ID }}
           ZAMPTO_DOMAIN: ${{ secrets.ZAMPTO_DOMAIN }}
           GOST_PROXY: ${{ secrets.GOST_PROXY }}
           TG_BOT: ${{ secrets.TG_BOT }}
