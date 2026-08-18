@@ -158,42 +158,93 @@ def _xclick(x, y):
 
 
 def _click_turnstile(sb):
-    coords = sb.execute_script("""
-        (function() {
-            var iframes = document.querySelectorAll('iframe');
-            for (var i = 0; i < iframes.length; i++) {
-                var src = iframes[i].src || '';
-                if (src.includes('cloudflare') || src.includes('turnstile')) {
-                    var r = iframes[i].getBoundingClientRect();
-                    if (r.width > 0 && r.height > 0)
-                        return {cx: Math.round(r.x+30), cy: Math.round(r.y+r.height/2)};
+    """尝试点击 Turnstile。优先用 JS 内点击，失败再回退 xdotool 屏幕坐标。"""
+    # 方案1：纯 JS 点击 iframe 或容器（不依赖窗口坐标，xvfb 下更稳）
+    js_ok = False
+    try:
+        js_ok = sb.execute_script("""
+            (function() {
+                // 先尝试找到可见的 turnstile iframe 并点击
+                var iframes = document.querySelectorAll('iframe');
+                for (var i = 0; i < iframes.length; i++) {
+                    var src = iframes[i].src || '';
+                    if (src.includes('cloudflare') || src.includes('turnstile')) {
+                        var r = iframes[i].getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0) {
+                            iframes[i].dispatchEvent(new MouseEvent('click', {
+                                bubbles: true, clientX: r.x + 30, clientY: r.y + r.height/2
+                            }));
+                            return true;
+                        }
+                    }
                 }
-            }
-            var inp = document.querySelector('input[name="cf-turnstile-response"]');
-            if (inp) {
-                var p = inp.parentElement;
-                for (var j = 0; j < 10; j++) {
-                    if (!p) break;
-                    var r = p.getBoundingClientRect();
-                    if (r.width > 100 && r.height > 30)
-                        return {cx: Math.round(r.x+30), cy: Math.round(r.y+r.height/2)};
-                    p = p.parentElement;
+                // fallback: 点击 input 父容器
+                var inp = document.querySelector('input[name="cf-turnstile-response"]');
+                if (inp) {
+                    var p = inp.parentElement;
+                    for (var j = 0; j < 10; j++) {
+                        if (!p) break;
+                        var r = p.getBoundingClientRect();
+                        if (r.width > 100 && r.height > 30) {
+                            p.dispatchEvent(new MouseEvent('click', {
+                                bubbles: true, clientX: r.x + 30, clientY: r.y + r.height/2
+                            }));
+                            return true;
+                        }
+                        p = p.parentElement;
+                    }
                 }
-            }
-            return null;
-        })();
-    """)
-    if not coords:
-        print("  ⚠️ 无法定位 Turnstile 坐标")
+                return false;
+            })();
+        """)
+    except Exception as e:
+        print(f"  ⚠️ JS 点击 Turnstile 失败: {e}")
+
+    if js_ok:
+        print("  🖱️ 已用 JS 点击 Turnstile")
         return
-    wi = sb.execute_script(
-        "return (function(){ return {sx: window.screenX||0, sy: window.screenY||0,"
-        "oh: window.outerHeight, ih: window.innerHeight}; })();)")
-    bar = wi["oh"] - wi["ih"]
-    ax = coords["cx"] + wi["sx"]
-    ay = coords["cy"] + wi["sy"] + bar
-    print(f"  🖱️ 点击 Turnstile ({ax}, {ay})  bar={bar}")
-    _xclick(ax, ay)
+
+    # 方案2：回退到 xdotool 屏幕坐标（需要 X 环境）
+    print("  🖱️ 回退到 xdotool 点击...")
+    try:
+        coords = sb.execute_script("""
+            (function() {
+                var iframes = document.querySelectorAll('iframe');
+                for (var i = 0; i < iframes.length; i++) {
+                    var src = iframes[i].src || '';
+                    if (src.includes('cloudflare') || src.includes('turnstile')) {
+                        var r = iframes[i].getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0)
+                            return {cx: Math.round(r.x+30), cy: Math.round(r.y+r.height/2)};
+                    }
+                }
+                var inp = document.querySelector('input[name="cf-turnstile-response"]');
+                if (inp) {
+                    var p = inp.parentElement;
+                    for (var j = 0; j < 10; j++) {
+                        if (!p) break;
+                        var r = p.getBoundingClientRect();
+                        if (r.width > 100 && r.height > 30)
+                            return {cx: Math.round(r.x+30), cy: Math.round(r.y+r.height/2)};
+                        p = p.parentElement;
+                    }
+                }
+                return null;
+            })();
+        """)
+        if not coords:
+            print("  ⚠️ 无法定位 Turnstile 坐标")
+            return
+        wi = sb.execute_script(
+            "return (function(){ return {sx: window.screenX||0, sy: window.screenY||0,"
+            "oh: window.outerHeight, ih: window.innerHeight}; })();")
+        bar = wi["oh"] - wi["ih"]
+        ax = coords["cx"] + wi["sx"]
+        ay = coords["cy"] + wi["sy"] + bar
+        print(f"  🖱️ xdotool 点击 Turnstile ({ax}, {ay})  bar={bar}")
+        _xclick(ax, ay)
+    except Exception as e:
+        print(f"  ⚠️ xdotool 点击也失败: {e}")
 
 
 def handle_turnstile(sb) -> bool:
