@@ -292,7 +292,7 @@ def click_renew_button(sb) -> bool:
             }
             return null;
         })();
-    """
+    """)
 
     if clicked:
         print(f"✅ 已点击续期按钮（方式: {clicked}）")
