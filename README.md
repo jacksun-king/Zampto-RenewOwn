@@ -100,4 +100,4 @@ crontab -e
 
 将仓库推到 GitHub，在 `Settings → Secrets and variables → Actions` 中配置：
 `ZAMPTO_ACCOUNT`、`ZAMPTO_PASSWORD`、`TARGET_SERVERS`（必填），`GOST_PROXY`、`TG_BOT`（可选）。
-之后可在 Actions 页手动触发，或每日 UTC 01:00 自动运行。
+之后可在 Actions 页手动触发，或按 schedule 自动运行（每 3.5 小时 ≈ 北京时间 00:00 / 03:30 / 07:00 / 10:30 / 14:00 / 17:30 / 21:00）。
