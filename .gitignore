@@ -1,2 +1,14 @@
 __pycache__/
 *.pyc
+# 本地测试残留
+singbox*.json
+singbox*.log
+sing-box-*/
+singbox.tgz
+xray
+xray.zip
+xray*.json
+xray*.log
+*_test.sh
+run_*.sh
+final_test.sh

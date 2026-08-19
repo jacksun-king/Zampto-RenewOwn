@@ -26,8 +26,9 @@ ZAMPTO_PASSWORD = os.environ.get("ZAMPTO_PASSWORD", "") or os.environ.get("PASSW
 TG_TOKEN = os.environ.get("TG_BOT_TOKEN", "") or os.environ.get("TG_TOKEN", "")
 TG_ID = os.environ.get("TG_CHAT_ID", "") or os.environ.get("TG_ID", "")
 
-# GOST_PROXY: 上游代理链接（支持 hy2://、hysteria2://、socks5://、http:// 等）。
-#   工作流会把它转成统一的本地 SOCKS5 端口 127.0.0.1:1080，脚本直接走本地端口。
+# GOST_PROXY: 上游节点链接（支持 vless:// vmess:// trojan:// hysteria2:// hy2:// tuic://
+#   anytls:// socks5:// socks:// http:// https://，由 parse_proxy.py 统一解析为 sing-box 配置）。
+#   工作流会把它转成统一的本地 mixed 端口 127.0.0.1:1080，脚本直接走本地端口。
 GOST_PROXY = os.environ.get("GOST_PROXY", "")
 LOCAL_PROXY = "socks5://127.0.0.1:1080" if GOST_PROXY else ""
 

@@ -67,7 +67,7 @@ jobs:
           pip install --cache-dir ~/.cache/pip -i https://pypi.tuna.tsinghua.edu.cn/simple seleniumbase requests[socks] python-xlib
           seleniumbase install chromedriver || true
 
-      - name: 🛡️ 启动代理转发（支持 GOST / Hysteria2 节点链接）
+      - name: 🛡️ 启动代理转发（sing-box 统一支持 vless/vmess/trojan/hysteria2/tuic/anytls/socks/http）
         if: ${{ env.GOST_PROXY != '' }}
         env:
           GOST_PROXY: ${{ secrets.GOST_PROXY }}
@@ -76,33 +76,21 @@ jobs:
           set -e
           PROXY="$GOST_PROXY"
           LOCAL_MIXED="socks5://127.0.0.1:${LOCAL_PROXY_PORT}"
-          if [[ "$PROXY" == hysteria2://* ]] || [[ "$PROXY" == hy2://* ]]; then
-            echo "🌐 检测到 Hysteria2 节点链接，使用 hysteria 客户端启动本地 SOCKS5"
-            VER=$(curl -s https://api.github.com/repos/apernet/hysteria/releases/latest | grep '"tag_name"' | head -1 | cut -d'"' -f4)
-            echo "📦 Hysteria 版本: $VER"
-            wget -q "https://github.com/apernet/hysteria/releases/download/${VER}/hysteria-linux-amd64"
-            chmod +x hysteria-linux-amd64
-            python3 parse_hy2.py
-            echo "📝 hy2_config.json:"
-            cat hy2_config.json
-            nohup ./hysteria-linux-amd64 client -c hy2_config.json > hy2.log 2>&1 &
-            sleep 6
-            echo "📝 hysteria 启动日志前 80 行:"
-            tail -n 80 hy2.log || true
-            echo "✅ Hysteria2 客户端已启动于 $LOCAL_MIXED"
-          else
-            echo "🌐 使用 GOST 转发上游代理: $PROXY"
-            VERSION=$(curl -s https://api.github.com/repos/ginuerzh/gost/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | tr -d 'v')
-            echo "📦 GOST 版本: $VERSION"
-            wget -q "https://github.com/ginuerzh/gost/releases/download/v${VERSION}/gost_${VERSION}_linux_amd64.tar.gz"
-            tar -xzf "gost_${VERSION}_linux_amd64.tar.gz"
-            chmod +x gost
-            nohup ./gost -L "mixed://:${LOCAL_PROXY_PORT}" -F "$PROXY" > gost.log 2>&1 &
-            sleep 3
-            echo "📝 gost 启动日志:"
-            cat gost.log || true
-            echo "✅ GOST 已启动于 $LOCAL_MIXED"
-          fi
+          echo "🌐 使用 sing-box 统一解析节点链接: $PROXY"
+          VER=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep '"tag_name"' | head -1 | cut -d'"' -f4)
+          echo "📦 sing-box 版本: $VER"
+          wget -q "https://github.com/SagerNet/sing-box/releases/download/${VER}/sing-box-${VER#v}-linux-amd64.tar.gz"
+          tar -xzf "sing-box-${VER#v}-linux-amd64.tar.gz"
+          SBBIN=$(find . -maxdepth 3 -name sing-box -type f | head -1)
+          chmod +x "$SBBIN"
+          python3 parse_proxy.py
+          echo "📝 singbox_config.json:"
+          cat singbox_config.json
+          nohup "$SBBIN" run -c singbox_config.json > singbox.log 2>&1 &
+          sleep 5
+          echo "📝 sing-box 启动日志:"
+          tail -n 60 singbox.log || true
+          echo "✅ sing-box 已启动于 $LOCAL_MIXED"
           echo "✅ 代理就绪，测试出口 IP..."
           curl -s --connect-timeout 10 --max-time 15 -x "$LOCAL_MIXED" https://api.ipify.org | sed 's/\([0-9]*\.[0-9]*\.\)[0-9]*\.[0-9]*/\1**.**/g' && echo "" || (echo "⚠️ 代理连通测试失败"; exit 1)
 
@@ -128,7 +116,6 @@ jobs:
           name: debug-${{ github.run_id }}
           path: |
             *.png
-            hy2.log
-            gost.log
-            hy2_config.json
+            singbox.log
+            singbox_config.json
           retention-days: 3

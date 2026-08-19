@@ -2,7 +2,8 @@
 
 本仓库包含：
 - `zampto_renew.py` — 自动续期脚本（配置全部走环境变量）
-- `.github/workflows/zampto_renew.yml` — GitHub Actions 定时运行
+- `parse_proxy.py` — 节点链接解析器（生成 sing-box 配置，支持全部主流代理协议）
+- `.github/workflows/zampto_renew.yml` — GitHub Actions 定时运行（内置 sing-box，自动下载）
 - `Dockerfile` — 容器化本地运行
 
 ---
@@ -14,12 +15,15 @@
 | `ZAMPTO_ACCOUNT` | 是 | 登录邮箱 |
 | `ZAMPTO_PASSWORD` | 是 | 登录密码 |
 | `TARGET_SERVERS` | 是 | JSON 数组，如 `[{"id":"4480","name":"java"},{"id":"4481","name":"python"}]` |
-| `GOST_PROXY` | 否 | 上游代理，如 `socks5://user:pass@host:port`；不设则直连 |
+| `GOST_PROXY` | 否 | 上游节点链接，支持 **vless:// vmess:// trojan:// hysteria2:// (hy2://) tuic:// anytls:// socks5:// socks:// http:// https://**；不设则直连 |
 | `TG_BOT` | 否 | Telegram 通知，`token:chatid` 格式 |
 
 `TARGET_SERVERS` 也可用组合形式替代：
 - `TARGET_IDS=4480,4481`
 - `TARGET_NAMES=java,python`（缺省时以 id 作为名字）
+
+> `GOST_PROXY` 名称保留兼容；内部统一由 `parse_proxy.py` 生成 sing-box 配置，
+> 在 `127.0.0.1:1080` 起一个 mixed 入口（socks5+http 通用），脚本与 SeleniumBase 都走它。
 
 ---
 
