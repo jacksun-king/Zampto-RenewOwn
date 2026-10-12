@@ -77,6 +77,7 @@ jobs:
           set -e
           PROXY="$GOST_PROXY"
           LOCAL_MIXED="socks5://127.0.0.1:${LOCAL_PROXY_PORT}"
+          set +e
           echo "🌐 使用 mihomo 解析代理节点"
           # 下载 mihomo（MetaCubeX 的 clash-meta 分支，原生支持 ss+obfs 插件，无需外部 obfs-local）
           MIHOMO_VER="v1.18.10"
@@ -112,8 +113,8 @@ jobs:
             curl -s -m 5 -X PUT "http://127.0.0.1:9090/proxies/GLOBAL" -d "{\"name\":\"$node\"}" >/dev/null 2>&1
             sleep 2
             # 检测出口 IP 性质
-            ORG=$(curl -s -m 12 -x "$LOCAL_MIXED" "https://ipinfo.io/json" 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('org','').lower())" 2>/dev/null)
-            IP=$(curl -s -m 12 -x "$LOCAL_MIXED" "https://api.ipify.org" 2>/dev/null)
+            ORG=$(curl -s -m 12 -x "$LOCAL_MIXED" "https://ipinfo.io/json" 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('org','').lower())" 2>/dev/null || echo "")
+            IP=$(curl -s -m 12 -x "$LOCAL_MIXED" "https://api.ipify.org" 2>/dev/null || echo "")
             if echo "$ORG" | grep -qiE "(hinet|chunghwa|as3462|data communication)"; then
               echo "✅ 住宅 IP 节点: $node → IP=$IP org=$ORG"
               SELECTED="$node"
