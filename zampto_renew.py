@@ -32,6 +32,9 @@ TG_ID = os.environ.get("TG_CHAT_ID", "") or os.environ.get("TG_ID", "")
 GOST_PROXY = os.environ.get("GOST_PROXY", "")
 LOCAL_PROXY = "socks5://127.0.0.1:1080" if GOST_PROXY else ""
 
+# 代理兜底标志：预检发现代理不可用时置 True，后续全部走直连
+PROXY_FAILED = False
+
 # LOGIN_URL: Zampto 登录页地址；未设置或为空时使用默认地址
 #   根据当前面板，默认登录页为 /auth/login
 LOGIN_URL = os.environ.get("LOGIN_URL", "") or "https://dash.zampto.net/auth/login"
@@ -75,7 +78,7 @@ def now_str():
 
 
 def _proxies():
-    if LOCAL_PROXY:
+    if LOCAL_PROXY and not PROXY_FAILED:
         return {"http": LOCAL_PROXY, "https": LOCAL_PROXY}
     return {}
 
@@ -1425,7 +1428,9 @@ def do_login(sb) -> bool:
 #   主流程
 # ============================================================
 def _preflight():
-    """运行前先探测登录页是否可达，避免卡在浏览器里浪费时间"""
+    """运行前先探测登录页是否可达，避免卡在浏览器里浪费时间。
+    代理不可用时自动回退直连（置 PROXY_FAILED，后续全部直连）。"""
+    global PROXY_FAILED
     print("🔎 预检：探测登录页连通性...")
     test_url = LOGIN_URL if LOGIN_URL else f"https://{DOMAIN}/auth/login"
     try:
@@ -1439,7 +1444,24 @@ def _preflight():
             print("  ⚠️ 返回 4xx，可能需带正确参数，但服务可达")
         return True
     except Exception as e:
-        print(f"  ❌ 登录页无法访问: {e}")
+        print(f"  ❌ 代理/网络访问失败: {e}")
+        # 若配置了代理且失败，自动回退直连再试一次
+        if LOCAL_PROXY and not PROXY_FAILED:
+            print("  🔄 检测到代理不可用，自动回退直连重试...")
+            PROXY_FAILED = True
+            try:
+                r = requests.get(test_url, timeout=20, proxies=_proxies(),
+                                 headers={"User-Agent": "Mozilla/5.0"})
+                print(f"  HTTP {r.status_code}  {test_url}（直连）")
+                if r.status_code >= 500:
+                    print("  ❌ 直连也遇到服务端/网关错误（如 522），登录页不可达")
+                    return False
+                if r.status_code >= 400:
+                    print("  ⚠️ 直连返回 4xx，可能需带正确参数，但服务可达")
+                return True
+            except Exception as e2:
+                print(f"  ❌ 直连也失败: {e2}")
+                return False
         return False
 
 
@@ -1454,7 +1476,10 @@ def main():
         raise SystemExit("❌ 登录页不可达，请检查 LOGIN_URL / 代理 / 网络")
 
     # 代理可选：SeleniumBase 的 proxy= 在 uc=True 下不生效，必须改用 --proxy-server 启动参数
-    sb_proxy = LOCAL_PROXY if LOCAL_PROXY else None
+    # 若预检已判定代理失败（PROXY_FAILED），浏览器也走直连
+    sb_proxy = LOCAL_PROXY if (LOCAL_PROXY and not PROXY_FAILED) else None
+    if PROXY_FAILED:
+        print("🔧 代理已失效，本次运行全程使用直连")
 
     with SB(uc=True, test=True,
             chromium_arg=f"--proxy-server={sb_proxy}" if sb_proxy else None) as sb:

@@ -92,7 +92,14 @@ jobs:
           tail -n 60 singbox.log || true
           echo "✅ sing-box 已启动于 $LOCAL_MIXED"
           echo "✅ 代理就绪，测试出口 IP..."
-          curl -s --connect-timeout 10 --max-time 15 -x "$LOCAL_MIXED" https://api.ipify.org | sed 's/\([0-9]*\.[0-9]*\.\)[0-9]*\.[0-9]*/\1**.**/g' && echo "" || (echo "⚠️ 代理连通测试失败"; exit 1)
+          # 修复：curl | sed 的退出码是 sed 的（0），curl 失败会被吞掉导致假绿。
+          # 改为 if 直接判断 curl 退出码；失败不中止（脚本有代理失效回退直连兜底）。
+          if OUT_IP=$(curl -s --connect-timeout 10 --max-time 15 -x "$LOCAL_MIXED" https://api.ipify.org); then
+            echo "✅ 出口 IP: $(echo "$OUT_IP" | sed 's/\([0-9]*\.[0-9]*\.\)[0-9]*\.[0-9]*/\1**.**/g')"
+          else
+            echo "⚠️ 代理连通测试失败（上游节点可能已失效）"
+            echo "⚠️ 不中止：续期脚本检测到代理不可用时自动回退直连"
+          fi
 
       - name: 🚀 运行续期脚本
         env:
