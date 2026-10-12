@@ -64,6 +64,7 @@ jobs:
 
       - name: 🐍 安装 Python 依赖
         run: |
+          pip install --cache-dir ~/.cache/pip seleniumbase requests[socks] python-xlib pyyaml || \
           pip install --cache-dir ~/.cache/pip -i https://pypi.tuna.tsinghua.edu.cn/simple seleniumbase requests[socks] python-xlib pyyaml
           seleniumbase install chromedriver || true
 
