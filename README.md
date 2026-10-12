@@ -3,6 +3,7 @@
 本仓库包含：
 - `zampto_renew.py` — 自动续期脚本（配置全部走环境变量）
 - `parse_proxy.py` — 节点链接解析器（生成 sing-box 配置，支持全部主流代理协议）
+- `parse_mihomo.py` — ss:// 节点解析器（生成 mihomo 配置，原生支持 Shadowsocks+obfs，用于机场节点）
 - `.github/workflows/zampto_renew.yml` — GitHub Actions 定时运行（内置 sing-box，自动下载）
 - `Dockerfile` — 容器化本地运行
 
@@ -22,8 +23,12 @@
 - `TARGET_IDS=4480,4481`
 - `TARGET_NAMES=java,python`（缺省时以 id 作为名字）
 
-> `GOST_PROXY` 名称保留兼容；内部统一由 `parse_proxy.py` 生成 sing-box 配置，
-> 在 `127.0.0.1:1080` 起一个 mixed 入口（socks5+http 通用），脚本与 SeleniumBase 都走它。
+> `GOST_PROXY` 名称保留兼容；支持两类输入：
+> - 通用节点链接（vmess/vless/trojan/hy2 等）→ `parse_proxy.py` 生成 sing-box 配置
+> - ss:// 节点链接（Shadowsocks，如机场节点）→ `parse_mihomo.py` 生成 mihomo 配置
+> 两者都在 `127.0.0.1:1080` 起一个 mixed 入口（socks5+http 通用），脚本与 SeleniumBase 都走它。
+> ⚠️ 注意：Zampto 会封数据中心 IP（GitHub Actions 的 Azure IP 会被 `/blocked` 拦截），
+> 必须使用住宅/运营商 IP 出口（如台湾中华电信等），机场的普通机房节点不可用。
 
 ---
 

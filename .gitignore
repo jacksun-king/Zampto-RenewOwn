@@ -12,3 +12,7 @@ xray*.log
 *_test.sh
 run_*.sh
 final_test.sh
+mihomo_config.yaml
+mihomo.log
+singbox_config.json
+singbox.log
