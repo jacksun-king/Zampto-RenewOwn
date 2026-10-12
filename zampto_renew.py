@@ -1529,11 +1529,14 @@ def main():
         if ok_count < len(TARGET_SERVERS):
             send_tg(f"📊 续期汇总：{ok_count}/{len(TARGET_SERVERS)} 成功\n"
                     f"失败的服务器请查看日志与截图，无需重启工作流，下次定时运行会自动再试\n时间: {now_str()}")
-        # 返回是否全部成功，供 CI 判断真实结果（全部成功=0，否则=1）
-        return ok_count == len(TARGET_SERVERS)
+        # 设置全局结果标志（不用 return，避免 with SB 上下文管理器干扰返回值）
+        global _RENEW_SUCCESS
+        _RENEW_SUCCESS = (ok_count == len(TARGET_SERVERS))
+
+
+_RENEW_SUCCESS = False  # 全局续期结果标志
 
 
 if __name__ == "__main__":
-    ok = main()
-    # 续期未全部成功时退出非零，让 workflow 显示真实失败（当前 GitHub Actions 判定）
-    sys.exit(0 if ok else 1)
+    main()
+    sys.exit(0 if _RENEW_SUCCESS else 1)
