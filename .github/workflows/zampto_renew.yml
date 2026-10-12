@@ -64,10 +64,10 @@ jobs:
 
       - name: 🐍 安装 Python 依赖
         run: |
-          pip install --cache-dir ~/.cache/pip -i https://pypi.tuna.tsinghua.edu.cn/simple seleniumbase requests[socks] python-xlib
+          pip install --cache-dir ~/.cache/pip -i https://pypi.tuna.tsinghua.edu.cn/simple seleniumbase requests[socks] python-xlib pyyaml
           seleniumbase install chromedriver || true
 
-      - name: 🛡️ 启动代理转发（mihomo 统一支持 ss/vmess/vless/trojan/hysteria2 等）
+      - name: 🛡️ 启动代理转发（mihomo + 自动选住宅 IP 节点）
         if: ${{ env.GOST_PROXY != '' }}
         env:
           GOST_PROXY: ${{ secrets.GOST_PROXY }}
@@ -89,18 +89,48 @@ jobs:
           echo "📦 mihomo 版本: $(./mihomo -v | head -1)"
           # 解析 GOST_PROXY 生成 mihomo 配置（mixed 监听 127.0.0.1:1080）
           python3 parse_mihomo.py
-          echo "📝 mihomo_config.yaml:"
-          cat mihomo_config.yaml
           nohup ./mihomo -f mihomo_config.yaml > mihomo.log 2>&1 &
           sleep 5
           echo "📝 mihomo 启动日志:"
-          tail -n 30 mihomo.log || true
+          tail -n 20 mihomo.log || true
           echo "✅ mihomo 已启动于 $LOCAL_MIXED"
-          echo "✅ 代理就绪，测试出口 IP..."
-          # 修复：curl | sed 的退出码是 sed 的（0），curl 失败会被吞掉导致假绿。
-          # 改为 if 直接判断 curl 退出码；失败不中止（脚本有代理失效回退直连兜底）。
+          echo ""
+          echo "🔍 自动遍历节点，寻找台湾住宅 IP..."
+          # 获取所有节点名（排除 DIRECT/REJECT 等内置项）
+          NODES=$(python3 -c "
+          import json,urllib.request
+          with urllib.request.urlopen('http://127.0.0.1:9090/proxies/GLOBAL') as r:
+              d=json.load(r)
+          for n in d.get('all',[]):
+              if n not in ('DIRECT','REJECT','PASS','COMPATIBLE'):
+                  print(n)
+          ")
+          SELECTED=""
+          for node in $NODES; do
+            # 切换到该节点
+            curl -s -m 5 -X PUT "http://127.0.0.1:9090/proxies/GLOBAL" -d "{\"name\":\"$node\"}" >/dev/null 2>&1
+            sleep 2
+            # 检测出口 IP 性质
+            ORG=$(curl -s -m 12 -x "$LOCAL_MIXED" "https://ipinfo.io/json" 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('org','').lower())" 2>/dev/null)
+            IP=$(curl -s -m 12 -x "$LOCAL_MIXED" "https://api.ipify.org" 2>/dev/null)
+            if echo "$ORG" | grep -qiE "(hinet|chunghwa|as3462|data communication)"; then
+              echo "✅ 住宅 IP 节点: $node → IP=$IP org=$ORG"
+              SELECTED="$node"
+              break
+            else
+              echo "⚠️ $node → IP=$IP org=$ORG（非住宅，跳过）"
+            fi
+          done
+          if [ -z "$SELECTED" ]; then
+            echo "⚠️ 未找到住宅 IP 节点，使用第一个台湾节点"
+            FIRST=$(echo "$NODES" | head -1)
+            curl -s -m 5 -X PUT "http://127.0.0.1:9090/proxies/GLOBAL" -d "{\"name\":\"$FIRST\"}" >/dev/null 2>&1
+            SELECTED="$FIRST"
+          fi
+          echo "🎯 选定节点: $SELECTED"
+          # 最终出口 IP 确认
           if OUT_IP=$(curl -s --connect-timeout 10 --max-time 15 -x "$LOCAL_MIXED" https://api.ipify.org); then
-            echo "✅ 出口 IP: $(echo "$OUT_IP" | sed 's/\([0-9]*\.[0-9]*\.\)[0-9]*\.[0-9]*/\1**.**/g')"
+            echo "✅ 最终出口 IP: $(echo "$OUT_IP" | sed 's/\([0-9]*\.[0-9]*\.\)[0-9]*\.[0-9]*/\1**.**/g')"
           else
             echo "⚠️ 代理连通测试失败（上游节点可能已失效）"
             echo "⚠️ 不中止：续期脚本检测到代理不可用时自动回退直连"
